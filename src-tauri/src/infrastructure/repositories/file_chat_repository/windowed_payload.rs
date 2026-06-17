@@ -270,8 +270,6 @@ async fn read_payload_before_lines(
     max_lines: usize,
 ) -> Result<ChatPayloadChunk, DomainError> {
     let metadata = read_existing_payload_metadata(path).await?;
-    verify_cursor_signature(path, cursor, &metadata)?;
-
     let (_, header_end_offset) = read_first_line_and_end_offset(path).await?;
 
     if cursor.offset > metadata.len() {
@@ -288,6 +286,8 @@ async fn read_payload_before_lines(
             path
         )));
     }
+
+    verify_cursor_offset_is_line_boundary(path, cursor.offset).await?;
 
     let lines_with_offsets =
         read_tail_lines_with_offsets(path, header_end_offset, end_position, max_lines).await?;

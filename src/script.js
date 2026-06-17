@@ -5049,10 +5049,15 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
             const deletedAgentStateIds = collectAgentPersistStateIdsFromMessage(chat[chat.length - 1]);
             deleteItemizedPromptForMessage(chat.length - 1);
             chat.length = chat.length - 1;
+            markWindowedChatDirtyFromIndex(chat.length);
             await removeLastMessage();
             await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
-            if (deletedAgentStateIds.length > 0) {
+
+            const hasWindowedCursor = Boolean(getWindowedChatState()?.cursor);
+            if (hasWindowedCursor || deletedAgentStateIds.length > 0) {
                 await saveChatConditional();
+            }
+            if (deletedAgentStateIds.length > 0) {
                 await pruneAgentPersistentStatesAfterDeletion(deletedAgentStateIds);
             }
         }
@@ -5143,43 +5148,63 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
     let generationChat = chat;
 
     if (isTauriChatPayloadTransportEnabled()) {
-        const windowState = getWindowedChatState();
+        let windowState = getWindowedChatState();
+
+        if (!dryRun && hasUnsavedWindowedChatChanges(windowState, chat.length)) {
+            await saveChatConditional();
+            windowState = getWindowedChatState();
+        }
 
         if (windowState?.cursor && windowState.hasMoreBefore) {
-            try {
-                const backfillResult = await buildGenerationChatWithBackfill({
-                    baseMessages: chat,
-                    windowState,
-                    contextBudgetTokens: this_max_context,
+            if (hasUnsavedWindowedChatChanges(windowState, chat.length)) {
+                console.warn('Skipping windowed prompt backfill because chat save state is still dirty after save attempt', {
+                    windowState: {
+                        kind: windowState.kind,
+                        id: windowState.id,
+                        characterName: windowState.characterName,
+                        fileName: windowState.fileName,
+                        cursor: windowState.cursor,
+                        savedMessageCount: windowState.savedMessageCount,
+                        dirtyFromIndex: windowState.dirtyFromIndex,
+                    },
+                    messageCount: chat.length,
                 });
-
-                generationChat = backfillResult.chat;
-                backfillResult.added.forEach(ensureMessageMediaIsArray);
-            } catch (error) {
-                if (isWindowedCursorInvalidError(error)) {
-                    const rawMessage = error?.message ?? error;
-                    const details = stripCommandErrorPrefixes(rawMessage) || t`Windowed chat cursor is invalid`;
-                    const reloadHint = t`Reload the chat to resync.`;
-
-                    toastr.warning(
-                        `${details}. ${reloadHint}`,
-                        t`Context backfill failed`,
-                        { preventDuplicates: true },
-                    );
-                    console.error('Context backfill failed, continuing with current window:', {
-                        error,
-                        windowState: {
-                            kind: windowState.kind,
-                            id: windowState.id,
-                            characterName: windowState.characterName,
-                            fileName: windowState.fileName,
-                            cursor: windowState.cursor,
-                        },
+            } else {
+                try {
+                    const backfillResult = await buildGenerationChatWithBackfill({
+                        baseMessages: chat,
+                        windowState,
+                        contextBudgetTokens: this_max_context,
                     });
 
-                    generationChat = chat;
-                } else {
-                    throw error;
+                    generationChat = backfillResult.chat;
+                    backfillResult.added.forEach(ensureMessageMediaIsArray);
+                } catch (error) {
+                    if (isWindowedCursorInvalidError(error)) {
+                        const rawMessage = error?.message ?? error;
+                        const details = stripCommandErrorPrefixes(rawMessage) || t`Windowed chat cursor is invalid`;
+                        const reloadHint = t`Reload the chat to resync.`;
+
+                        toastr.warning(
+                            `${details}. ${reloadHint}`,
+                            t`Context backfill failed`,
+                            { preventDuplicates: true },
+                        );
+                        console.error('Context backfill failed, continuing with current window:', {
+                            error,
+                            windowState: {
+                                kind: windowState.kind,
+                                id: windowState.id,
+                                characterName: windowState.characterName,
+                                fileName: windowState.fileName,
+                                cursor: windowState.cursor,
+                            },
+                        });
+
+                        generationChat = chat;
+                    } else {
+                        throw error;
+                    }
                 }
             }
         }
@@ -8326,6 +8351,19 @@ export function markWindowedChatDirtyFromIndex(messageId) {
 
     const current = Number(windowState.dirtyFromIndex);
     windowState.dirtyFromIndex = Number.isFinite(current) ? Math.min(current, normalized) : normalized;
+}
+
+function hasUnsavedWindowedChatChanges(windowState, messageCount) {
+    if (!windowState?.cursor) {
+        return false;
+    }
+
+    const savedMessageCount = Number(windowState.savedMessageCount);
+    const dirtyFromIndex = Number(windowState.dirtyFromIndex);
+    return !Number.isFinite(savedMessageCount)
+        || !Number.isFinite(dirtyFromIndex)
+        || savedMessageCount !== messageCount
+        || dirtyFromIndex < savedMessageCount;
 }
 
 /**

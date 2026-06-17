@@ -2491,6 +2491,94 @@ async fn patch_chat_payload_windowed_appends_and_rewrites_tail() {
 }
 
 #[tokio::test]
+async fn get_chat_payload_before_lines_tolerates_tail_save_after_cursor() {
+    let (repository, root) = setup_repository().await;
+
+    let character_name = "alice";
+    let file_name = "session";
+    let payload = vec![
+        payload_with_integrity("stale-before-read")[0].clone(),
+        json!({
+            "name": "User",
+            "is_user": true,
+            "send_date": "2026-01-01T00:00:00.000Z",
+            "mes": "one",
+            "extra": {},
+        }),
+        json!({
+            "name": "Alice",
+            "is_user": false,
+            "send_date": "2026-01-01T00:00:01.000Z",
+            "mes": "two",
+            "extra": {},
+        }),
+        json!({
+            "name": "User",
+            "is_user": true,
+            "send_date": "2026-01-01T00:00:02.000Z",
+            "mes": "three",
+            "extra": {},
+        }),
+    ];
+
+    save_chat_payload_from_values(
+        &repository,
+        &root,
+        character_name,
+        file_name,
+        &payload,
+        false,
+    )
+    .await
+    .expect("save initial payload");
+
+    let tail = repository
+        .get_chat_payload_tail_lines(character_name, file_name, 1)
+        .await
+        .expect("get tail");
+    assert_eq!(tail.lines.len(), 1);
+    let stale_cursor = tail.cursor;
+
+    let appended = json!({
+        "name": "Alice",
+        "is_user": false,
+        "send_date": "2026-01-01T00:00:03.000Z",
+        "mes": "four",
+        "extra": {},
+    });
+    repository
+        .patch_chat_payload_windowed(
+            character_name,
+            file_name,
+            stale_cursor,
+            tail.header,
+            ChatPayloadPatchOp::Append {
+                lines: vec![serde_json::to_string(&appended).expect("serialize appended line")],
+            },
+            false,
+        )
+        .await
+        .expect("append after stale read cursor");
+
+    let before = repository
+        .get_chat_payload_before_lines(character_name, file_name, stale_cursor, 2)
+        .await
+        .expect("read before with stale signature");
+    let values = before
+        .lines
+        .iter()
+        .map(|line| serde_json::from_str::<Value>(line).expect("parse before line"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0].get("mes"), Some(&json!("one")));
+    assert_eq!(values[1].get("mes"), Some(&json!("two")));
+    assert!(before.cursor.size > stale_cursor.size);
+
+    let _ = fs::remove_dir_all(&root).await;
+}
+
+#[tokio::test]
 async fn patch_chat_payload_windowed_rejects_missing_integrity_when_existing_has_one() {
     let (repository, root) = setup_repository().await;
 
