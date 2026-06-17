@@ -366,6 +366,7 @@ impl ChatCompletionService {
             &self.secret_repository,
         )
         .await?;
+        let model_hint = dto.get_string("model").map(str::to_string);
         let payload = dto.payload;
         let (endpoint_path, mut upstream_payload) = payload::build_payload(source, payload)?;
         self.apply_tauritavern_prompt_caching(
@@ -379,6 +380,12 @@ impl ChatCompletionService {
         .await?;
         additional_parameters.apply_body_overrides(&mut upstream_payload)?;
         payload::validate_upstream_tool_transcript(&endpoint_path, &upstream_payload)?;
+        // Final provider-boundary cleanup; earlier stages should preserve prompt state.
+        sanitize_provider_bound_payload_before_llm_api(
+            &mut upstream_payload,
+            model_hint.as_deref(),
+            &endpoint_path,
+        );
 
         let response = self
             .chat_completion_repository
@@ -478,6 +485,7 @@ impl ChatCompletionService {
             &self.secret_repository,
         )
         .await?;
+        let model_hint = dto.get_string("model").map(str::to_string);
         let payload = dto.payload;
         let (endpoint_path, mut upstream_payload) = payload::build_payload(source, payload)?;
         self.apply_tauritavern_prompt_caching(
@@ -491,6 +499,12 @@ impl ChatCompletionService {
         .await?;
         additional_parameters.apply_body_overrides(&mut upstream_payload)?;
         payload::validate_upstream_tool_transcript(&endpoint_path, &upstream_payload)?;
+        // Final provider-boundary cleanup; earlier stages should preserve prompt state.
+        sanitize_provider_bound_payload_before_llm_api(
+            &mut upstream_payload,
+            model_hint.as_deref(),
+            &endpoint_path,
+        );
 
         self.chat_completion_repository
             .generate_stream(
@@ -684,12 +698,296 @@ fn apply_nanogpt_claude_cache_control(payload: &mut Value, ttl: &str) -> bool {
     true
 }
 
+fn sanitize_provider_bound_payload_before_llm_api(
+    payload: &mut Value,
+    model_hint: Option<&str>,
+    endpoint_path: &str,
+) {
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+
+    let body_model = object
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    prune_empty_system_messages(object.get_mut("messages"));
+    trim_final_assistant_trailing_whitespace(object.get_mut("messages"));
+    if model_disallows_assistant_prefill(body_model.as_deref())
+        || model_disallows_assistant_prefill(model_hint)
+        || model_disallows_assistant_prefill(Some(endpoint_path))
+    {
+        normalize_core_message_roles(object.get_mut("messages"));
+        move_last_user_message_to_end(object.get_mut("messages"));
+    }
+
+    let remove_system = match object.get_mut("system") {
+        Some(system) => {
+            prune_empty_system_array_entries(system);
+            is_empty_system_value(system)
+        }
+        None => false,
+    };
+
+    if remove_system {
+        object.remove("system");
+    }
+}
+
+fn model_disallows_assistant_prefill(model: Option<&str>) -> bool {
+    let Some(model) = model else {
+        return false;
+    };
+    let model = normalize_model_for_assistant_prefill_match(model);
+    [
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+    ]
+    .iter()
+    .any(|unsupported_model| model.contains(unsupported_model))
+}
+
+fn normalize_model_for_assistant_prefill_match(model: &str) -> String {
+    model
+        .trim()
+        .to_ascii_lowercase()
+        .replace("%2e", ".")
+        .replace("%2d", "-")
+        .replace("%5f", "_")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn move_last_user_message_to_end(messages: Option<&mut Value>) {
+    let Some(Value::Array(entries)) = messages else {
+        return;
+    };
+
+    let Some(last_user_index) = entries.iter().rposition(is_user_message) else {
+        return;
+    };
+
+    if last_user_index + 1 == entries.len() {
+        return;
+    }
+
+    let last_user_message = entries.remove(last_user_index);
+    entries.push(last_user_message);
+}
+
+fn normalize_core_message_roles(messages: Option<&mut Value>) {
+    let Some(Value::Array(entries)) = messages else {
+        return;
+    };
+
+    for entry in entries {
+        let Some(object) = entry.as_object_mut() else {
+            continue;
+        };
+        let Some(role) = object.get("role").and_then(Value::as_str) else {
+            continue;
+        };
+
+        let normalized_role = match role.trim().to_ascii_lowercase().as_str() {
+            "system" => "system",
+            "user" => "user",
+            "assistant" => "assistant",
+            "tool" => "tool",
+            _ => continue,
+        };
+
+        object.insert(
+            "role".to_string(),
+            Value::String(normalized_role.to_string()),
+        );
+    }
+}
+
+fn is_user_message(message: &Value) -> bool {
+    message
+        .as_object()
+        .and_then(|object| object.get("role"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|role| role.eq_ignore_ascii_case("user"))
+}
+
+fn trim_final_assistant_trailing_whitespace(messages: Option<&mut Value>) {
+    let Some(Value::Array(entries)) = messages else {
+        return;
+    };
+
+    let Some(last) = entries.last_mut() else {
+        return;
+    };
+    let Some(object) = last.as_object_mut() else {
+        return;
+    };
+
+    let role_is_assistant = object
+        .get("role")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|role| role.eq_ignore_ascii_case("assistant"));
+    if !role_is_assistant {
+        return;
+    }
+
+    if let Some(content) = object.get_mut("content") {
+        trim_trailing_whitespace_from_content(content);
+    }
+}
+
+fn trim_trailing_whitespace_from_content(content: &mut Value) {
+    match content {
+        Value::String(text) => {
+            *text = trim_provider_text_end(text);
+        }
+        Value::Array(entries) => trim_trailing_whitespace_from_content_array(entries),
+        Value::Object(object) => {
+            if let Some(Value::String(text)) = object.get_mut("text") {
+                *text = trim_provider_text_end(text);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn trim_trailing_whitespace_from_content_array(entries: &mut Vec<Value>) {
+    while let Some(last) = entries.last_mut() {
+        match last {
+            Value::String(text) => {
+                *text = trim_provider_text_end(text);
+                if text.is_empty() {
+                    entries.pop();
+                    continue;
+                }
+                break;
+            }
+            Value::Object(object) => {
+                if let Some(Value::String(text)) = object.get_mut("text") {
+                    *text = trim_provider_text_end(text);
+                    if is_empty_system_object(object) {
+                        entries.pop();
+                        continue;
+                    }
+                }
+                break;
+            }
+            Value::Array(nested) => {
+                trim_trailing_whitespace_from_content_array(nested);
+                if nested.is_empty() {
+                    entries.pop();
+                    continue;
+                }
+                break;
+            }
+            Value::Null => {
+                entries.pop();
+            }
+            _ => break,
+        }
+    }
+}
+
+fn prune_empty_system_messages(messages: Option<&mut Value>) {
+    let Some(Value::Array(entries)) = messages else {
+        return;
+    };
+
+    entries.retain(|entry| !is_empty_system_message(entry));
+}
+
+fn is_empty_system_message(message: &Value) -> bool {
+    let Some(object) = message.as_object() else {
+        return false;
+    };
+
+    let role_is_system = object
+        .get("role")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|role| role.eq_ignore_ascii_case("system"));
+    if !role_is_system {
+        return false;
+    }
+
+    object.get("content").is_none_or(is_empty_system_value)
+}
+
+fn prune_empty_system_array_entries(system: &mut Value) {
+    let Value::Array(entries) = system else {
+        return;
+    };
+
+    entries.retain(|entry| !is_empty_system_value(entry));
+}
+
+fn is_empty_system_value(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(text) => is_blank_provider_text(text),
+        Value::Array(entries) => entries.iter().all(is_empty_system_value),
+        Value::Object(object) => is_empty_system_object(object),
+        _ => false,
+    }
+}
+
+fn is_empty_system_object(object: &Map<String, Value>) -> bool {
+    if object.is_empty() {
+        return true;
+    }
+
+    if object.get("type").and_then(Value::as_str) == Some("text") {
+        return object.get("text").is_none_or(is_empty_system_value);
+    }
+
+    if let Some(text) = object.get("text") {
+        let has_substantive_non_text_field = object.iter().any(|(key, value)| {
+            !matches!(key.as_str(), "text" | "type" | "cache_control")
+                && !is_empty_system_value(value)
+        });
+        return !has_substantive_non_text_field && is_empty_system_value(text);
+    }
+
+    object.values().all(is_empty_system_value)
+}
+
+fn is_blank_provider_text(text: &str) -> bool {
+    text.chars().all(is_provider_blank_char)
+}
+
+fn trim_provider_text_end(text: &str) -> String {
+    text.trim_end_matches(is_provider_blank_char).to_string()
+}
+
+fn is_provider_blank_char(character: char) -> bool {
+    character.is_whitespace()
+        || matches!(
+            character,
+            '\u{180E}' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}'
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
 
     use super::apply_nanogpt_claude_cache_control;
     use super::resolve_status_model_list_source;
+    use super::sanitize_provider_bound_payload_before_llm_api;
     use crate::domain::repositories::chat_completion_repository::ChatCompletionSource;
 
     #[test]
@@ -744,6 +1042,352 @@ mod tests {
             resolve_status_model_list_source(ChatCompletionSource::Custom, "gemini_interactions")
                 .expect("status transport should resolve");
         assert_eq!(source, ChatCompletionSource::Makersuite);
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_removes_blank_top_level_system_string() {
+        let mut payload = json!({
+            "model": "test-model",
+            "system": "   \n\t",
+            "messages": [{"role": "user", "content": "hello"}],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        assert!(
+            payload.get("system").is_none(),
+            "blank top-level system field must be removed before the API call"
+        );
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_prunes_empty_claude_system_blocks() {
+        let mut payload = json!({
+            "model": "claude-test",
+            "system": [
+                { "type": "text", "text": "" },
+                { "type": "text", "text": " \n " },
+                { "type": "text", "text": "keep me" }
+            ],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        let system = payload
+            .get("system")
+            .and_then(Value::as_array)
+            .expect("non-empty system block must remain");
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0]["text"], "keep me");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_removes_system_array_when_all_blocks_are_empty() {
+        let mut payload = json!({
+            "model": "claude-test",
+            "system": [
+                { "type": "text", "text": "" },
+                { "text": "", "cache_control": { "type": "ephemeral" } }
+            ],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        assert!(payload.get("system").is_none());
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_removes_empty_system_messages_for_litellm_bedrock() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-6",
+            "messages": [
+                { "role": "system", "content": "" },
+                { "role": "system", "content": [{ "type": "text", "text": "\u{200b}\n " }] },
+                { "role": "system", "content": "keep this" },
+                { "role": "user", "content": "hello" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "keep this");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_trims_final_assistant_string_content() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-5",
+            "messages": [
+                { "role": "user", "content": "continue" },
+                { "role": "assistant", "content": "partial reply \n\t" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        assert_eq!(payload["messages"][1]["content"], "partial reply");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_trims_final_assistant_content_parts() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-5",
+            "messages": [
+                { "role": "assistant", "content": "older reply " },
+                { "role": "user", "content": "continue" },
+                {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "partial reply " },
+                        { "type": "text", "text": "\u{200b}\n" }
+                    ]
+                }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        assert_eq!(messages[0]["content"], "older reply ");
+        let final_content = messages[2]["content"]
+            .as_array()
+            .expect("final assistant content must remain array");
+        assert_eq!(final_content.len(), 1);
+        assert_eq!(final_content[0]["text"], "partial reply");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_trims_blank_final_assistant_without_removing_it() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-7",
+            "messages": [
+                { "role": "user", "content": "continue" },
+                { "role": "assistant", "content": " \u{200b}\n" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["content"], "");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_keeps_assistant_prefill_for_unsupported_bedrock_claude() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-7",
+            "assistant_prefill": "prefill",
+            "messages": [
+                { "role": "system", "content": "keep system" },
+                { "role": "user", "content": "continue" },
+                { "role": "assistant", "content": "partial reply \n" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        assert_eq!(payload["assistant_prefill"], "prefill");
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "partial reply");
+        assert_eq!(messages[2]["role"], "user");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_uses_model_hint_when_body_model_is_absent() {
+        let mut payload = json!({
+            "messages": [
+                { "role": "user", "content": "continue" },
+                { "role": "assistant", "content": "partial reply" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(
+            &mut payload,
+            Some("global.anthropic.claude-opus-4-6-v1:0"),
+            "",
+        );
+
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_uses_endpoint_path_when_body_model_is_absent() {
+        let mut payload = json!({
+            "messages": [
+                { "role": "user", "content": "continue" },
+                { "role": "assistant", "content": "partial reply" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(
+            &mut payload,
+            None,
+            "/model/us.anthropic.claude-opus-4.7-v1:0/invoke",
+        );
+
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_keeps_trailing_assistant_messages_for_unsupported_claude() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-6",
+            "messages": [
+                { "role": "user", "content": "continue" },
+                {
+                    "role": "assistant",
+                    "content": "tool reply",
+                    "tool_calls": [{ "id": "call_1", "type": "function" }]
+                },
+                {
+                    "role": "assistant",
+                    "content": "native reply",
+                    "native": { "provider": "test" }
+                }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["native"]["provider"], "test");
+        assert_eq!(messages[2]["role"], "user");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_moves_last_user_after_trailing_controls_for_unsupported_claude() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-6",
+            "messages": [
+                { "role": "system", "content": "opening system" },
+                { "role": "user", "content": "older user" },
+                { "role": "assistant", "content": "older assistant" },
+                { "role": "user", "content": "latest user" },
+                { "role": "system", "content": "control one" },
+                { "role": "assistant", "content": "control assistant" },
+                { "role": "system", "content": "control two" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        let roles: Vec<_> = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            roles,
+            vec![
+                "system",
+                "user",
+                "assistant",
+                "system",
+                "assistant",
+                "system",
+                "user",
+            ]
+        );
+        assert_eq!(messages.last().unwrap()["content"], "latest user");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_lowercases_roles_when_moving_last_user_for_unsupported_claude() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-6",
+            "messages": [
+                { "role": "SYSTEM", "content": "opening system" },
+                { "role": "USER", "content": "older user" },
+                { "role": "assistant", "content": "older assistant" },
+                { "role": "USER", "content": "latest user" },
+                { "role": "assistant", "content": "control assistant" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        let roles: Vec<_> = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            roles,
+            vec!["system", "user", "assistant", "assistant", "user"]
+        );
+        assert_eq!(messages.last().unwrap()["content"], "latest user");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_keeps_final_assistant_prefill_for_supported_claude() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-5",
+            "assistant_prefill": "prefill",
+            "messages": [
+                { "role": "user", "content": "continue" },
+                { "role": "assistant", "content": "partial reply \n" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        assert_eq!(payload["assistant_prefill"], "prefill");
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "partial reply");
     }
 }
 
