@@ -36,6 +36,7 @@ export const SCRIPT_TYPE_UNKNOWN = -1;
  */
 const DEFAULT_GET_REGEX_SCRIPTS_OPTIONS = Object.freeze({ allowedOnly: false });
 const NATIVE_REGEX_SUPPORTED_FLAGS = new Set(['g', 'i', 'm', 's', 'u', 'v']);
+const NATIVE_REGEX_RISKY_SYNTAX_REGEX = /\(\?(?:[=!]|<[=!])/;
 const SUBSTITUTE_PARAM_TOKEN_REGEX = /{{|<(?:USER|BOT|CHAR|CHARIFNOTGROUP|GROUP)>/i;
 const REPLACEMENT_CAPTURE_REF_REGEX = /\$(?:\d+|<[^>]+>)/;
 
@@ -410,6 +411,11 @@ function toNativeRegexScript(regexScript, rawString) {
     const findRegex = regexFromString(regexString);
 
     if (!findRegex) {
+        return null;
+    }
+
+    // regress can be dramatically slower than V8 for lookaround-heavy prompt regexes.
+    if (NATIVE_REGEX_RISKY_SYNTAX_REGEX.test(findRegex.source)) {
         return null;
     }
 

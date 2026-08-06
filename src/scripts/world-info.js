@@ -5184,8 +5184,8 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
             });
 
 
-        let newContent = '';
-        const textToScanTokens = await getTokenCountAsync(allActivatedText);
+        // Count each candidate once; recounting the growing prefix here makes large lorebooks quadratic.
+        let newContentTokens = await getTokenCountAsync(allActivatedText);
 
         filterByInclusionGroups(newEntries, allActivatedEntries, buffer, scanState, timedEffects);
 
@@ -5234,9 +5234,10 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
 
             // Substitute macros inline, for both this checking and also future processing
             entry.content = substituteParams(entry.content);
-            newContent += `${entry.content}\n`;
+            const entryContent = `${entry.content}\n`;
+            newContentTokens += await getTokenCountAsync(entryContent);
 
-            if (!entry.ignoreBudget && (textToScanTokens + (await getTokenCountAsync(newContent))) >= budget) {
+            if (!entry.ignoreBudget && newContentTokens >= budget) {
                 if (!token_budget_overflowed) {
                     console.debug('[WI] --- BUDGET OVERFLOW CHECK ---');
                     if (world_info_overflow_alert) {

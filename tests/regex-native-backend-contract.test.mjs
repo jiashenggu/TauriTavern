@@ -20,3 +20,10 @@ test('native regex DTO remains an execution payload, not SillyTavern extension s
 
     assert.doesNotMatch(source, /\bpub\s+disabled\b/);
 });
+
+test('lookaround-heavy regexes stay on the JavaScript fallback path', async () => {
+    const source = await readFile(path.join(REPO_ROOT, 'src', 'scripts', 'extensions', 'regex', 'engine.js'), 'utf8');
+
+    assert.match(source, /NATIVE_REGEX_RISKY_SYNTAX_REGEX/);
+    assert.match(source, /NATIVE_REGEX_RISKY_SYNTAX_REGEX\.test\(findRegex\.source\)[\s\S]*?return null/);
+});
