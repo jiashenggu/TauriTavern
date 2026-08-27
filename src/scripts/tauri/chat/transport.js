@@ -157,6 +157,48 @@ export async function loadCharacterChatPayloadBeforePages({ characterName, avata
     });
 }
 
+/**
+ * Read character chat messages by absolute, zero-based message index.
+ * Passing an empty index array returns the absolute total without loading message bodies.
+ */
+export async function readCharacterChatMessages({ characterName, avatarUrl, fileName, indices = [] }) {
+    const normalizedCharacter = resolveCharacterDirectoryId(characterName, avatarUrl);
+    const normalizedFile = normalizeChatFileName(fileName);
+    if (!normalizedCharacter || !normalizedFile.trim() || !Array.isArray(indices)) {
+        throw new Error('Invalid absolute character chat message request');
+    }
+
+    const normalizedIndices = indices.map((index) => {
+        const value = Number(index);
+        if (!Number.isSafeInteger(value) || value < 0) {
+            throw new Error(`Invalid absolute character chat message index: ${String(index)}`);
+        }
+        return value;
+    });
+
+    return invoke('read_character_chat_messages', {
+        characterName: normalizedCharacter,
+        fileName: normalizedFile,
+        indices: normalizedIndices,
+    });
+}
+
+/** Read an inclusive absolute message range from a character chat. */
+export async function readCharacterChatMessageRange({ characterName, avatarUrl, fileName, start, end }) {
+    const normalizedStart = Number(start);
+    const normalizedEnd = Number(end);
+    if (!Number.isSafeInteger(normalizedStart) || normalizedStart < 0
+        || !Number.isSafeInteger(normalizedEnd) || normalizedEnd < normalizedStart) {
+        throw new Error(`Invalid absolute character chat message range: ${String(start)}-${String(end)}`);
+    }
+
+    const indices = Array.from(
+        { length: normalizedEnd - normalizedStart + 1 },
+        (_, offset) => normalizedStart + offset,
+    );
+    return readCharacterChatMessages({ characterName, avatarUrl, fileName, indices });
+}
+
 export async function saveCharacterChatPayload({ characterName, avatarUrl, fileName, payload, force = false }) {
     const normalizedCharacter = resolveCharacterDirectoryId(characterName, avatarUrl);
     const normalizedFile = normalizeChatFileName(fileName);

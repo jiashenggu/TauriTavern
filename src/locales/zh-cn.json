@@ -2190,6 +2190,8 @@
     "help_hotkeys_18": "滚动到上下文行",
     "help_hotkeys_19": "Ctrl+Shift+下",
     "help_hotkeys_20": "滚动聊天到底部",
+    "help_hotkeys_20_1": "Ctrl+Shift+Home",
+    "help_hotkeys_20_2": "滚动到最新 AI 回复的开头",
     "help_hotkeys_21": "在输入框中生效，由这个图标标记：",
     "help_hotkeys_22": "**加粗**",
     "help_hotkeys_23": "*斜体*",

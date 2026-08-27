@@ -40,6 +40,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         super::chat_commands::clear_chat_cache,
         super::chat_commands::get_chat_payload_path,
         super::chat_commands::get_chat_payload_tail,
+        super::chat_commands::read_character_chat_messages,
         super::chat_commands::get_chat_payload_before,
         super::chat_commands::get_chat_payload_before_pages,
         super::chat_commands::save_chat_payload_windowed,

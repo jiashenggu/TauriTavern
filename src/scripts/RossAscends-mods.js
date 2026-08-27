@@ -46,6 +46,7 @@ import { Popup } from './popup.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { getCurrentUserHandle } from './user.js';
 import { kai_settings } from './kai-settings.js';
+import { scrollToLatestAssistantMessage, shouldPreserveEditorHotkey } from './chat-scroll-hotkeys.js';
 
 var RPanelPin = document.getElementById('rm_button_panel_pin');
 var LPanelPin = document.getElementById('lm_button_panel_pin');
@@ -1043,6 +1044,17 @@ export function initRossMods() {
             $('#chat').animate({
                 scrollTop: $('#chat').prop('scrollHeight'),
             }, 300);
+            return;
+        }
+        //ctrl+shift+home to scroll to the start of the latest AI response
+        if (event.shiftKey && event.ctrlKey && event.key == 'Home') {
+            if (shouldPreserveEditorHotkey(event.target)) {
+                return;
+            }
+
+            if (scrollToLatestAssistantMessage($)) {
+                event.preventDefault();
+            }
             return;
         }
 

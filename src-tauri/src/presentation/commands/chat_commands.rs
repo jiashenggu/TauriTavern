@@ -356,6 +356,32 @@ pub async fn get_chat_payload_tail(
     }
 }
 
+/// Read selected character chat messages using absolute, zero-based message indices.
+/// An empty index list is allowed and returns only the total message count.
+#[tauri::command]
+pub async fn read_character_chat_messages(
+    character_name: String,
+    file_name: String,
+    indices: Vec<usize>,
+    app_state: State<'_, Arc<AppState>>,
+) -> Result<crate::domain::repositories::chat_types::ChatMessagesReadResult, CommandError> {
+    log_command(format!(
+        "read_character_chat_messages {}/{} ({} indices)",
+        character_name,
+        file_name,
+        indices.len()
+    ));
+
+    app_state
+        .chat_service
+        .read_character_chat_messages(&character_name, &file_name, &indices)
+        .await
+        .map_err(map_command_error(format!(
+            "Failed to read character chat messages {}/{}",
+            character_name, file_name
+        )))
+}
+
 #[tauri::command]
 pub async fn get_chat_payload_before(
     character_name: String,

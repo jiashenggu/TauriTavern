@@ -544,6 +544,20 @@ impl ChatService {
             .map_err(Into::into)
     }
 
+    /// Read character chat messages by their absolute, zero-based message indices.
+    pub async fn read_character_chat_messages(
+        &self,
+        character_name: &str,
+        file_name: &str,
+        indices: &[usize],
+    ) -> Result<crate::domain::repositories::chat_types::ChatMessagesReadResult, ApplicationError>
+    {
+        self.chat_repository
+            .read_character_chat_messages(character_name, file_name, indices)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn prune_agent_persistent_states(
         &self,
         target: &AgentChatWorkspaceTarget,

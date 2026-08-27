@@ -112,6 +112,7 @@ import { updateReasoningUI, parseReasoningFromString, getReasoningTemplateByName
 import { IGNORE_SYMBOL } from './constants.js';
 import { macros } from './macros/macro-system.js';
 import { createSafeGenerate } from './util/safe-generate.js';
+import { readCharacterChatMessageRange, readCharacterChatMessages } from './tauri/chat/transport.js';
 
 const generateSafely = createSafeGenerate({
     waitForIdle: waitForGenerationIdle,
@@ -132,6 +133,8 @@ export function getContext() {
             ? groups.find(x => x.id == selected_group)?.chat_id
             : (characters[this_chid]?.chat),
         getCurrentChatId,
+        readCharacterChatMessages,
+        readCharacterChatMessageRange,
         getRequestHeaders,
         reloadCurrentChat,
         renameChat,

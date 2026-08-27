@@ -1,3 +1,22 @@
+/data/
+/tmp/
+/.claude/
+/.codex/
+/.tmp*
+/backups/
+/archive/
+/misc/
+
+# Local package-manager state
+/.pnpm-store/
+
+# Local Codex backups and debugging captures
+/.codex-backups/
+
+# Ad-hoc source lists and timestamped/manual backups
+*.tmp.txt
+*.bak-*
+
 # Logs
 logs
 *.log
