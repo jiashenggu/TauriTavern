@@ -81,6 +81,7 @@ impl AdditionalParameters {
         for key in custom_parameters::parse_key_list(&self.exclude_body)? {
             body.remove(&key);
         }
+        body.remove("top_p");
 
         Ok(())
     }
@@ -168,6 +169,52 @@ mod tests {
         assert_eq!(upstream_payload["temperature"], json!(0.7));
         assert_eq!(upstream_payload["metadata"]["feature"], json!("override"));
         assert!(upstream_payload.get("stream").is_none());
+    }
+
+    #[test]
+    fn top_p_is_excluded_without_preset_configuration() {
+        for overrides in [
+            json!({}),
+            json!({ "custom_exclude_body": "" }),
+            json!({ "custom_exclude_body": null }),
+            json!({ "custom_exclude_body": "[]" }),
+            json!({ "custom_exclude_body": "{}" }),
+        ] {
+            let original = overrides.clone();
+            let parameters = AdditionalParameters::from_payload(overrides.as_object().unwrap())
+                .expect("parameters parse");
+            for stream in [false, true] {
+                let mut upstream = json!({
+                    "model": "azure/anthropic/claude-opus-4-6",
+                    "temperature": 1,
+                    "top_p": 1,
+                    "stream": stream
+                });
+                parameters.apply_body_overrides(&mut upstream).unwrap();
+                assert!(upstream.get("top_p").is_none(), "{overrides}");
+                assert_eq!(upstream["temperature"], json!(1));
+                assert_eq!(upstream["stream"], json!(stream));
+            }
+            assert_eq!(overrides, original);
+        }
+    }
+
+    #[test]
+    fn top_p_exclusion_preserves_other_overrides_and_wins_over_inclusion() {
+        for exclude in ["- top_k", "[\"top_k\"]", "top_k", "top_k: true"] {
+            let input = json!({
+                "custom_include_body": "top_p: 0.8\ntemperature: 0.7\nmetadata: { feature: override }",
+                "custom_exclude_body": exclude
+            });
+            let parameters =
+                AdditionalParameters::from_payload(input.as_object().unwrap()).unwrap();
+            let mut upstream = json!({ "temperature": 1, "top_p": 1, "top_k": 40 });
+            parameters.apply_body_overrides(&mut upstream).unwrap();
+            assert!(upstream.get("top_p").is_none());
+            assert!(upstream.get("top_k").is_none());
+            assert_eq!(upstream["temperature"], json!(0.7));
+            assert_eq!(upstream["metadata"]["feature"], json!("override"));
+        }
     }
 
     #[test]
