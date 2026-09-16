@@ -987,6 +987,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::apply_nanogpt_claude_cache_control;
+    use super::payload;
     use super::resolve_status_model_list_source;
     use super::sanitize_provider_bound_payload_before_llm_api;
     use crate::domain::repositories::chat_completion_repository::ChatCompletionSource;
@@ -1043,6 +1044,61 @@ mod tests {
             resolve_status_model_list_source(ChatCompletionSource::Custom, "gemini_interactions")
                 .expect("status transport should resolve");
         assert_eq!(source, ChatCompletionSource::Makersuite);
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_preserves_provider_built_prefill() {
+        for (source, model) in [
+            (ChatCompletionSource::DeepSeek, "deepseek-chat"),
+            (ChatCompletionSource::Claude, "claude-sonnet-4-5"),
+        ] {
+            let input = json!({
+                "model": model,
+                "messages": [
+                    { "role": "user", "content": "continue" },
+                    { "role": "assistant", "content": "partial reply" }
+                ],
+            });
+            let (endpoint_path, mut payload) =
+                payload::build_payload(source, input.as_object().unwrap().clone())
+                    .expect("provider payload should build");
+            let expected = payload["messages"].clone();
+
+            sanitize_provider_bound_payload_before_llm_api(
+                &mut payload,
+                Some(model),
+                &endpoint_path,
+            );
+
+            assert_eq!(payload["messages"], expected, "{model}");
+            let last = payload["messages"].as_array().unwrap().last().unwrap();
+            assert_eq!(last["role"], "assistant");
+            if source == ChatCompletionSource::DeepSeek {
+                assert_eq!(last["prefix"], true);
+            }
+        }
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_preserves_openai_tool_exchange_and_trailing_control() {
+        let mut payload = json!({
+            "model": "gpt-4o",
+            "messages": [
+                { "role": "user", "content": "check the weather" },
+                { "role": "assistant", "content": null, "tool_calls": [
+                    { "id": "call_1", "type": "function", "function": { "name": "weather", "arguments": "{}" } }
+                ] },
+                { "role": "tool", "tool_call_id": "call_1", "content": "sunny" },
+                { "role": "system", "content": "Return a concise summary" }
+            ],
+        });
+        let expected = payload.clone();
+        payload::validate_upstream_tool_transcript("/chat/completions", &payload).unwrap();
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        assert_eq!(payload, expected);
+        payload::validate_upstream_tool_transcript("/chat/completions", &payload).unwrap();
     }
 
     #[test]
@@ -1136,6 +1192,7 @@ mod tests {
         sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
 
         assert_eq!(payload["messages"][1]["content"], "partial reply");
+        assert_eq!(payload["messages"][0]["role"], "user");
     }
 
     #[test]
@@ -1192,7 +1249,7 @@ mod tests {
     }
 
     #[test]
-    fn llm_boundary_sanitizer_keeps_assistant_prefill_for_unsupported_bedrock_claude() {
+    fn llm_boundary_sanitizer_preserves_assistant_prefill_field_while_moving_user() {
         let mut payload = json!({
             "model": "aws/anthropic/bedrock-claude-opus-4-7",
             "assistant_prefill": "prefill",
@@ -1218,55 +1275,47 @@ mod tests {
     }
 
     #[test]
-    fn llm_boundary_sanitizer_uses_model_hint_when_body_model_is_absent() {
+    fn llm_boundary_sanitizer_keeps_assistant_prefill_for_non_claude_model() {
         let mut payload = json!({
+            "model": "gcp/google/gemini-3.7-flash",
             "messages": [
                 { "role": "user", "content": "continue" },
                 { "role": "assistant", "content": "partial reply" }
             ],
         });
 
-        sanitize_provider_bound_payload_before_llm_api(
-            &mut payload,
-            Some("global.anthropic.claude-opus-4-6-v1:0"),
-            "",
-        );
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
 
         let messages = payload
             .get("messages")
             .and_then(Value::as_array)
             .expect("messages must remain");
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0]["role"], "assistant");
-        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "assistant");
     }
 
     #[test]
-    fn llm_boundary_sanitizer_uses_endpoint_path_when_body_model_is_absent() {
-        let mut payload = json!({
-            "messages": [
-                { "role": "user", "content": "continue" },
-                { "role": "assistant", "content": "partial reply" }
-            ],
-        });
-
-        sanitize_provider_bound_payload_before_llm_api(
-            &mut payload,
-            None,
-            "/model/us.anthropic.claude-opus-4.7-v1:0/invoke",
-        );
-
-        let messages = payload
-            .get("messages")
-            .and_then(Value::as_array)
-            .expect("messages must remain");
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0]["role"], "assistant");
-        assert_eq!(messages[1]["role"], "user");
+    fn llm_boundary_sanitizer_uses_model_hint_or_endpoint_when_body_model_is_absent() {
+        for (hint, endpoint) in [
+            (Some("global.anthropic.claude-opus-4-6-v1:0"), ""),
+            (None, "/model/us.anthropic.claude-opus-4.7-v1:0/invoke"),
+            (None, "/model/anthropic.claude%2Dsonnet%2D4%2E6/invoke"),
+        ] {
+            let mut payload = json!({
+                "messages": [
+                    { "role": "user", "content": "continue" },
+                    { "role": "assistant", "content": "partial reply" }
+                ],
+            });
+            sanitize_provider_bound_payload_before_llm_api(&mut payload, hint, endpoint);
+            assert_eq!(payload["messages"][0]["role"], "assistant");
+            assert_eq!(payload["messages"][1]["role"], "user");
+        }
     }
 
     #[test]
-    fn llm_boundary_sanitizer_keeps_trailing_assistant_messages_for_unsupported_claude() {
+    fn llm_boundary_sanitizer_preserves_trailing_assistant_message_data() {
         let mut payload = json!({
             "model": "aws/anthropic/bedrock-claude-opus-4-6",
             "messages": [
@@ -1387,8 +1436,9 @@ mod tests {
             .and_then(Value::as_array)
             .expect("messages must remain");
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[0]["role"], "user");
         assert_eq!(messages[1]["content"], "partial reply");
+        assert_eq!(messages[1]["role"], "assistant");
     }
 }
 

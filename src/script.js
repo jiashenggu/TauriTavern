@@ -355,7 +355,7 @@ import { captureItemizedPromptsSaveSnapshot, clearItemizedPrompts, deleteItemize
 import { getSystemMessageByType, initSystemMessages, SAFETY_CHAT, sendSystemMessage, system_message_types, system_messages } from './scripts/system-messages.js';
 import { event_types, eventSource } from './scripts/events.js';
 import { initAccessibility } from './scripts/a11y.js';
-import { applyStreamFadeIn } from './scripts/util/stream-fadein.js';
+import { finishStreamingMessageText, renderStreamingMessageText } from './scripts/util/stream-fadein.js';
 import { initDomHandlers } from './scripts/dom-handlers.js';
 import { SimpleMutex } from './scripts/util/SimpleMutex.js';
 import { createGenerationIdleGate } from './scripts/util/generation-idle-gate.js';
@@ -4365,11 +4365,10 @@ class StreamingProcessor {
                 false,
             );
             if (this.messageTextDom instanceof HTMLElement) {
-                if (power_user.stream_fade_in) {
-                    applyStreamFadeIn(this.messageTextDom, formattedText);
-                } else {
-                    this.messageTextDom.innerHTML = formattedText;
-                }
+                renderStreamingMessageText(this.messageTextDom, formattedText, {
+                    fadeIn: power_user.stream_fade_in,
+                    isFinal,
+                });
             }
 
             const timePassed = formatGenerationTimer(this.timeStarted, currentTime, currentTokenCount, this.reasoningHandler.getDuration(), this.timeToFirstToken);
@@ -4468,7 +4467,15 @@ class StreamingProcessor {
         this.abortController.abort();
         this.isStopped = true;
 
+        if (this.messageTextDom instanceof HTMLElement) {
+            finishStreamingMessageText(this.messageTextDom);
+        }
         this.markUIGenStopped();
+        try {
+            this.reasoningHandler.flushPendingRender(this.messageId);
+        } catch (error) {
+            console.error('Failed to flush reasoning display', error);
+        }
 
         const noEmitTypes = ['swipe', 'impersonate', 'continue'];
         if (!noEmitTypes.includes(this.type)) {
