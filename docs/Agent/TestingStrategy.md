@@ -7,10 +7,10 @@
 测试要守住：
 
 - Legacy Generate 兼容。
-- Clean Architecture 边界。
+- workspace crate 边界。
 - Workspace path 安全。
 - Journal 完整性。
-- Windowed payload 保存契约。
+- 完整 chat payload 保存契约。
 - LLM gateway 不绕过现有 policy/logging。
 - Tool policy 与 approval。
 - MCP 安全边界。
@@ -29,6 +29,8 @@ AgentRunStatus transitions
 AgentRunEvent serialization
 PlanPolicy strict/free/hybrid
 ToolPolicy allow/deny/approval
+InvocationToolSnapshot ordered binding/duplicate alias invariants
+ToolTurnContract all-snapshot/choice invariants
 Profile resolution precedence
 Checkpoint metadata
 ```
@@ -52,10 +54,15 @@ commit service called through expected boundary
 tool loop success
 tool recoverable error
 tool policy denied
+root/return-mode child/handoff snapshot compilation and persistence
+snapshot budget remains authoritative throughout invocation
+ToolRequestGate rejects snapshot/choice violations without consuming budget
+ToolRequestGate reserves exact total/per-canonical-ToolId budget boundaries
 plan locked node violation
 profile switch allowed/denied
 agent.list policy filtering
 agent.delegate creates task and child invocation
+agent.delegate rejects hard runtime budget arguments
 agent.delegate schedules return-mode child task on background scheduler
 agent.await waits for background child task and renders result capsule
 completed child results are injected into the next parent model turn once
@@ -63,6 +70,7 @@ workspace.finish cancels unfinished child tasks without blocking run completion
 task.return records result and terminates child invocation
 child invocation cannot commit, finish, or delegate
 child workspace policy keeps paths unchanged and only scopes visible/writable roots
+child tool snapshot removes commit/finish/delegation and appends task.return
 ```
 
 关键断言：
@@ -106,6 +114,11 @@ cancel propagates
 tool_call_id opaque round-trip
 native metadata round-trip
 canonical AgentModelRequest/AgentModelResponse encode-decode
+provider tool name resolves only through current turn alias
+canonical/raw/unadvertised tool name fails without global fallback
+same-native cross-provider tool results encode through canonical ToolId
+same-native external timeline events do not inherit builtin side-effect semantics
+tool result call/tool identity mismatch fails before effects and audit persistence
 recent workspace write/patch tool result hydration
 tool args/results use short hashed local audit file names while preserving opaque provider tool_call_id
 ```
@@ -178,17 +191,16 @@ run timeline mobile view gesture uses Pointer Events only as an input shortcut a
 
 Provider normalizer tests 必须覆盖可见 reasoning 提取：Claude `thinking`、Gemini `thought` 文本、OpenAI Responses reasoning summary 进入 `reasoning_content`；signature / encrypted continuation 仍作为 native/provider state 保留，不能作为可展示文本。
 
-## 7. Windowed Payload Integration Tests
+## 7. Chat History / Save Integration Tests
 
 覆盖：
 
 ```text
-Agent reads history through windowed/search APIs
-Agent does not expand UI chat window
+Agent reads bounded history through paged/search APIs
+Agent does not replace or truncate canonical frontend chat
 Agent commit uses chat save contract
-Agent commit does not trigger cursor mismatch under serialized saves
-cursor mismatch fails clearly
-force does not bypass cursor signature
+Agent commit remains ordered under serialized saves
+integrity and atomic publish failures surface clearly
 rollback committed message uses save contract
 ```
 
@@ -203,7 +215,7 @@ Windows drive path rejected
 symlink escape rejected
 hidden resource not in context
 denied tool not visible
-denied tool call fails
+unadvertised/denied tool alias fails at the current turn boundary
 MCP arbitrary stdio command rejected
 Agent cannot edit MCP config
 extension tool without authorization hidden
@@ -253,9 +265,10 @@ Golden fixtures 应尽量脱敏，不包含真实 API key 或私人聊天。
 
 - 后端 `cargo check --manifest-path src-tauri/Cargo.toml` 通过。
 - 后端 `cargo test --manifest-path src-tauri/Cargo.toml agent_runtime_service` 通过。
-- 后端 `cargo test --manifest-path src-tauri/Cargo.toml file_agent_repository` 通过。
-- 后端 `cargo test --manifest-path src-tauri/Cargo.toml file_agent_profile_repository` 通过。
-- 涉及前端 ABI 时，前端 `pnpm run check:types`、`pnpm run check:contracts`、`pnpm run check:frontend` 通过。
+- 后端 `cargo test --manifest-path src-tauri/Cargo.toml -p tt-adapter-storage-userdata file_agent_repository` 通过。
+- 后端 `cargo test --manifest-path src-tauri/Cargo.toml -p tt-adapter-storage-userdata file_agent_profile_repository` 通过。
+- `node scripts/check-rust-crate-boundaries.mjs` 通过。
+- 涉及前端 ABI 时，前端 `pnpm run check:types`、`pnpm run test:contracts`、`pnpm run check:frontend` 通过。
 - 控制台 smoke 能通过 `startRunFromLegacyGenerate()` 启动 run。
 - 控制台 Agent smoke 能依次调用 `chat_search`、`chat_read_messages`、`worldinfo_read_activated`，写入 `output/main.md` 并进入 `awaiting_commit`。
 - `cargo test agent_model_gateway`、`cargo test openai_responses_payload`、`cargo test claude_native_content_blocks_are_replayed`、`cargo test normalize_` 通过。

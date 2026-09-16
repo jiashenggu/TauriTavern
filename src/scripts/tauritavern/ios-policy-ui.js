@@ -97,6 +97,7 @@ export function applyIosPolicyUiProjection() {
         cssRules.push(`
             body[data-tt-ios-policy-scope="ios"][data-tt-ios-policy-profile="ios_external_beta"] #ttv-compat-row,
             body[data-tt-ios-policy-scope="ios"][data-tt-ios-policy-profile="ios_external_beta"] #ttv-discord-link,
+            body[data-tt-ios-policy-scope="ios"][data-tt-ios-policy-profile="ios_external_beta"] #ttv-telegram-link,
             body[data-tt-ios-policy-scope="ios"][data-tt-ios-policy-profile="ios_external_beta"] #tt-welcome-discord-link {
                 display: none !important;
             }
@@ -196,8 +197,7 @@ export function applyIosPolicyUiProjection() {
     }
 
     if (caps.llm?.text_completions?.enabled === false) {
-        const textCompletionOption = requireElement('#main_api option[value="textgenerationwebui"]');
-        textCompletionOption.remove();
+        document.querySelector('#main_api option[value="textgenerationwebui"]')?.remove();
         hideElement(requireElement('#textgenerationwebui_api'));
     }
 

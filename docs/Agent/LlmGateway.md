@@ -8,8 +8,8 @@
 
 当前后端 LLM 事实：
 
-- Provider source 定义在 `ChatCompletionSource`。见 `src-tauri/src/domain/repositories/chat_completion_repository.rs`。
-- Payload builder 由 `application/services/chat_completion_service/payload/mod.rs` 按 provider 分发。
+- Provider source 定义在 `ChatCompletionSource`。见 `src-tauri/crates/tt-domain/src/models/chat_completion_source.rs`；旧的 repository 路径仍 re-export 以保持兼容。
+- Payload builder 由 `crates/tt-application/src/services/chat_completion_service/payload/mod.rs` 按 provider 分发。
 - `ChatCompletionService` 负责 source 解析、iOS policy、endpoint override、feature policy、settings、secret、prompt caching、payload build、generate/generate_stream/cancel。
 - LLM API 日志依赖 `LoggingChatCompletionRepository` wrapper。
 - Custom Native API 文档强调 tool call id 透明性与 native metadata 保真。见 `docs/CurrentState/NativeApiFormats.md`。
@@ -66,6 +66,10 @@ AgentModelResponse {
 }
 ```
 
+`tool_choice` 使用 domain-owned `ToolChoice::{None, Auto, Required, Specific(ToolId)}`，不保存 provider JSON。当前 Agent 生产请求显式使用 `Auto`；runtime 的完成约束仍由 invocation exit policy 与 tool effect 执行，不能由单轮 provider choice 代替。
+
+`Specific(ToolId)` 只接受当前 request-scoped `AgentModelTool` 中已广告的 canonical 工具，并解析到 snapshot 冻结的 `modelAlias`。空工具集上的 `Required`/`Specific`、未公布 ID 都会在发送前失败。原始 prompt payload 中的 `tools`/`tool_choice` 不能覆盖这份 typed contract。
+
 `AgentModelContentPart` 当前支持：
 
 ```text
@@ -116,6 +120,8 @@ provider native response
 
 这个过渡结构保留了现有 ChatCompletionService 投资，同时让 Agent runtime 摆脱 OpenAI-shaped raw JSON。
 
+Provider payload builder 负责最后一段精确转换：OpenAI Chat/Responses、Claude、Gemini generateContent、Gemini Interactions 和 Cohere 不得把未知 choice 改成 Auto 或静默省略。Provider/model 无法表达的组合必须返回明确错误；例如 Claude manual extended thinking 不能与 forced tool choice 同时使用。
+
 ## 5. Native Metadata Contract
 
 Provider native metadata 必须当作 opaque continuation state。
@@ -126,7 +132,7 @@ Provider native metadata 必须当作 opaque continuation state。
 | --- | --- | --- |
 | Claude Messages | assistant `content` blocks，包括 `thinking`、`tool_use`、signature | 同 provider 续接时原样回放 |
 | Gemini | response `content.parts` 与 `thoughtSignature` | 同 provider 续接时原样回放 |
-| Gemini Interactions | raw `outputs` | 同 provider 续接时原样回放 |
+| Gemini Interactions | raw `steps` | 同 provider 续接时原样回放 |
 | OpenAI Responses | raw `output` items 与 `responseId` | function call output / reasoning continuation |
 
 禁止：
@@ -163,12 +169,13 @@ OpenAI Responses Agent 路径使用 persistent WebSocket session。session 由 `
 
 ## 6. Tool Schema
 
-Tool registry 只产 canonical `AgentToolSpec`。
+Gateway 消费从当前 invocation snapshot/turn 单向生成的 `AgentModelTool`；它只包含 canonical `ToolId`、本 invocation 冻结的 model alias、description 与 input schema。Base `ToolCatalog` 与 UI DTO 不进入 provider payload 路径。
 
 Gateway/payload adapter 在发送前渲染 provider-facing schema：
 
 ```text
-AgentToolSpec
+InvocationToolSnapshot + ToolTurnContract
+  -> AgentModelTool
   -> provider-specific schema sanitizer
   -> OpenAI-compatible function tool shape
   -> existing provider payload builder maps to native shape
@@ -188,12 +195,12 @@ Tool call id 必须是不透明字符串：
 
 ```text
 Provider tool call id
-  -> AgentToolCall.id
+  -> ToolInvocation.call_id + ToolInvocation.tool_id
   -> AgentToolResult.call_id
   -> provider tool result id
 ```
 
-缺失 id 是 `model.invalid_tool_call`，不得静默生成 `tool_call_{index}`。
+缺失 id 是 `model.invalid_tool_call`，不得静默生成 `tool_call_{index}`。`AgentToolResult` 同时携带 canonical `ToolId`；历史 call/result 的 alias 都只能通过当前 request 的 model-tool projection 精确编码，不按 native name 猜测。
 
 Tool result 当前会编码为 JSON 字符串，包含：
 
@@ -222,6 +229,10 @@ Gateway 必须遵守：
 - model/profile tool support 声明。
 
 Policy denied 必须 fail-fast 并写 journal，不允许静默降级为另一个 provider、另一个模型或空工具集。
+
+## 8.1 `custom_*` 参数优先级
+
+用户填写的 `custom_include_body`、`custom_exclude_body`、`custom_include_headers` 是明确的上游请求覆盖，优先级高于 TauriTavern 自动组装的 provider 参数。后端只负责解析并透传这些字段，不按 provider 语义二次裁决；若与 prompt caching 等自动功能冲突，自动功能必须退让，上游 provider 负责接受或拒绝最终请求。
 
 ## 9. Prompt Cache
 
@@ -261,7 +272,11 @@ model.request_failed
 model.stream_failed
 model.cancelled
 model.native_metadata_lost
+model.provider_refusal
+model.output_truncated
 ```
+
+Agent gateway 在 canonical decode 与工具执行前检查 terminal reason：`refusal` 返回 `model.provider_refusal`；`max_tokens`、`length`、`model_context_window_exceeded` 返回 `model.output_truncated`。两者都是 provider 已明确给出的终态，不自动重试，也不消费部分文本或工具调用。
 
 Agent runtime 会按 Profile `run.modelRetry` 重试 `429` rate limit 与 transient transport/provider availability 错误。`model.upstream_invalid_response` 专用于上游响应体不可读或不是合法 provider JSON 的暂态异常，可自动重试；payload build、policy denied、provider 明确拒绝、response schema decode、tool call id、native metadata 等本地或 provider 明确契约错误不重试。
 
@@ -279,6 +294,8 @@ Agent runtime 会按 Profile `run.modelRetry` 重试 `429` rate limit 与 transi
 - OpenAI Responses native output items 回放。
 - OpenAI Responses `provider_state.previousResponseId` 注入与 `messageCursor` 增量输入。
 - Claude / Gemini native continuation 计数与缺失 fail-fast。
+- 内建 Bedrock Claude 使用 Claude Messages adapter；其他 Bedrock family 与自定义模板仍使用通用 adapter。
+- provider refusal 与输出截断在 canonical decode 前 fail-fast。
 - same-provider native metadata loss fail-fast。
 - cross-provider switch 不迁移 provider-private state。
 - LLM API log 剥离 `_tauritavern_provider_state`。

@@ -1061,7 +1061,12 @@ test('Agent run timeline projects SubAgent tasks without flattening child events
             id: 'evt-root-tool',
             runId: 'run-1',
             type: 'tool_call_completed',
-            payload: { invocationId: 'inv_root', callId: 'call_delegate', name: 'agent.delegate' },
+            payload: {
+                invocationId: 'inv_root',
+                callId: 'call_delegate',
+                toolId: 'builtin:agent.delegate',
+                name: 'agent.delegate',
+            },
         },
         {
             seq: 2,
@@ -1116,7 +1121,12 @@ test('Agent run timeline projects SubAgent tasks without flattening child events
             id: 'evt-child-tool',
             runId: 'run-1',
             type: 'tool_call_completed',
-            payload: { invocationId: 'inv-child', callId: 'call_return', name: 'task.return' },
+            payload: {
+                invocationId: 'inv-child',
+                callId: 'call_return',
+                toolId: 'builtin:task.return',
+                name: 'task.return',
+            },
         },
         {
             seq: 6,
@@ -1213,7 +1223,12 @@ test('Agent run timeline projects Handoff as foreground chain', async () => {
             id: 'evt-handoff-tool',
             runId: 'run-1',
             type: 'tool_call_completed',
-            payload: { invocationId: 'inv_root', callId: 'call_handoff', name: 'agent.handoff' },
+            payload: {
+                invocationId: 'inv_root',
+                callId: 'call_handoff',
+                toolId: 'builtin:agent.handoff',
+                name: 'agent.handoff',
+            },
         },
         {
             seq: 2,
@@ -1253,6 +1268,7 @@ test('Agent run timeline projects Handoff as foreground chain', async () => {
             payload: {
                 invocationId: 'inv-editor',
                 callId: 'call-read',
+                toolId: 'builtin:workspace.read_file',
                 name: 'workspace.read_file',
                 displayMetrics: { chars: 80, words: 12 },
             },
@@ -1361,7 +1377,12 @@ test('Agent run timeline shows Handoff invocation start when only foreground pro
             id: 'evt-editor-read',
             runId: 'run-1',
             type: 'tool_call_completed',
-            payload: { invocationId: 'inv-editor', callId: 'call-read', name: 'workspace.read_file' },
+            payload: {
+                invocationId: 'inv-editor',
+                callId: 'call-read',
+                toolId: 'builtin:workspace.read_file',
+                name: 'workspace.read_file',
+            },
         },
     ];
 
@@ -1388,6 +1409,7 @@ test('Agent run timeline uses projection envelope when Handoff markers are outsi
             payload: {
                 invocationId: 'inv-editor',
                 callId: 'call-read',
+                toolId: 'builtin:workspace.read_file',
                 name: 'workspace.read_file',
             },
         },
@@ -1809,17 +1831,128 @@ test('FrozenRunInputSnapshot stores materialized extension prompts and macro con
         },
     });
 
+    const backendCalls = [];
+    const currentModelConnectionApi = {
+        async buildCurrentModelConnectionSnapshot(input) {
+            backendCalls.push(input);
+            return {
+                schemaVersion: 1,
+                kind: 'tauritavern.currentModelConnectionSnapshot',
+                settings: {
+                    chat_completion_source: input.settings.chat_completion_source,
+                    model: input.model,
+                    custom_model: input.model,
+                    custom_url: input.settings.custom_url,
+                    custom_api_format: input.settings.custom_api_format,
+                    secret_id: input.secretId,
+                },
+            };
+        },
+        async applyCurrentModelConnectionSnapshot(input) {
+            return {
+                ...input.settings,
+                ...input.currentModelConnection.settings,
+            };
+        },
+    };
+    const currentModelConnection = await frozen.buildCurrentModelConnectionSnapshot({
+        settings: {
+            chat_completion_source: 'custom',
+            custom_model: 'opencode-model',
+            custom_url: 'https://opencode.example.test/v1',
+            custom_api_format: 'openai_compat',
+            additional_parameters_by_source: {
+                custom: { include_body: '', exclude_body: '', include_headers: 'X-Test: true' },
+            },
+        },
+        model: 'opencode-model',
+        secretKey: 'api_key_custom',
+        secretState: {
+            api_key_custom: [
+                { id: 'old-secret', active: false },
+                { id: 'opencode-secret', active: true },
+            ],
+        },
+        currentModelConnectionApi,
+    });
     const snapshot = frozen.buildFrozenRunInputSnapshot({
         generationType: 'swipe',
         promptInputs: { type: 'swipe', extensionPrompts },
         worldInfoActivation: { entries: [] },
         macroContext: { names: { user: 'User', char: 'Char' } },
+        currentModelConnection,
     });
     const normalized = frozen.normalizeFrozenRunInputSnapshot(snapshot);
 
     assert.equal(normalized.generationType, 'swipe');
     assert.equal(normalized.macroContext.names.char, 'Char');
     assert.equal(Object.hasOwn(normalized.promptInputs.extensionPrompts.active, 'filter'), false);
+    assert.equal(normalized.currentModelConnection.settings.custom_url, 'https://opencode.example.test/v1');
+    assert.equal(normalized.currentModelConnection.settings.secret_id, 'opencode-secret');
+    assert.equal(backendCalls[0].settings.additional_parameters_by_source.custom.include_headers, 'X-Test: true');
+    assert.equal(backendCalls[0].secretId, 'opencode-secret');
+});
+
+test('CurrentModelConnectionSnapshot replays current connection over preset settings', async () => {
+    const frozen = await importFresh('src/scripts/tauritavern/agent/frozen-run-input-snapshot.js');
+    const currentModelConnectionApi = {
+        async buildCurrentModelConnectionSnapshot(input) {
+            return {
+                schemaVersion: 1,
+                kind: 'tauritavern.currentModelConnectionSnapshot',
+                settings: {
+                    chat_completion_source: input.settings.chat_completion_source,
+                    model: input.model,
+                    custom_model: input.model,
+                    custom_url: input.settings.custom_url,
+                    custom_api_format: input.settings.custom_api_format,
+                    secret_id: input.secretId,
+                },
+            };
+        },
+        async applyCurrentModelConnectionSnapshot(input) {
+            const output = { ...input.settings };
+            delete output.chat_completion_source;
+            delete output.custom_model;
+            delete output.custom_url;
+            delete output.secret_id;
+            return {
+                ...output,
+                ...input.currentModelConnection.settings,
+            };
+        },
+    };
+    const snapshot = await frozen.buildCurrentModelConnectionSnapshot({
+        settings: {
+            chat_completion_source: 'custom',
+            custom_model: 'deepseek-through-custom',
+            custom_url: 'https://api.deepseek.example/v1',
+            custom_api_format: 'openai_compat',
+            secret_id: 'stale-secret',
+        },
+        model: 'deepseek-through-custom',
+        secretKey: 'api_key_custom',
+        secretState: {
+            api_key_custom: [
+                { id: 'deepseek-secret', active: true },
+            ],
+        },
+        currentModelConnectionApi,
+    });
+
+    const effectiveSettings = await frozen.buildSettingsWithCurrentModelConnectionSnapshot({
+        chat_completion_source: 'custom',
+        custom_model: 'opencode-model',
+        custom_url: 'https://opencode.example.test/v1',
+        secret_id: 'opencode-secret',
+        temp_openai: 0.7,
+    }, snapshot, currentModelConnectionApi);
+
+    assert.equal(effectiveSettings.chat_completion_source, 'custom');
+    assert.equal(effectiveSettings.custom_model, 'deepseek-through-custom');
+    assert.equal(effectiveSettings.custom_url, 'https://api.deepseek.example/v1');
+    assert.equal(effectiveSettings.secret_id, 'deepseek-secret');
+    assert.equal(effectiveSettings.temp_openai, 0.7);
 });
 
 test('/trigger routes Agent generation fail-fast without Legacy fallback', async () => {
@@ -3197,6 +3330,7 @@ test('Agent run event presenter keeps timeline projection focused', async () => 
         level: 'info',
         payload: {
             callId: 'call-1',
+            toolId: 'builtin:workspace.write_file',
             name: 'workspace.write_file',
             argumentsRef: 'tool-args/call-1.json',
         },
@@ -3255,6 +3389,7 @@ test('Agent run event presenter keeps timeline projection focused', async () => 
         level: 'info',
         payload: {
             callId: 'call-read',
+            toolId: 'builtin:workspace.read_file',
             name: 'workspace.read_file',
             displayMetrics: {
                 chars: 48,
@@ -3322,7 +3457,11 @@ test('Agent run event presenter keeps timeline projection focused', async () => 
             id: 'evt-completed',
             runId: 'run-1',
             type: 'tool_call_completed',
-            payload: { callId: 'call-1', name: 'workspace.write_file' },
+            payload: {
+                callId: 'call-1',
+                toolId: 'builtin:workspace.write_file',
+                name: 'workspace.write_file',
+            },
         },
         {
             seq: 4,
@@ -3334,6 +3473,31 @@ test('Agent run event presenter keeps timeline projection focused', async () => 
         directOutputEvent,
     ]);
     assert.deepEqual(projected.map(event => event.type), ['workspace_file_written', 'direct_output_captured']);
+});
+
+test('Agent run timeline does not treat a same-native MCP tool as a builtin side effect', async () => {
+    const presenter = await importFresh('src/scripts/extensions/agent-system/src/run-event-presenter.js');
+    const toolId = 'mcp/registration-1:workspace.finish';
+    const events = [
+        {
+            seq: 1,
+            id: 'evt-requested',
+            runId: 'run-1',
+            type: 'tool_call_requested',
+            payload: { callId: 'call-mcp', toolId, name: 'workspace.finish' },
+        },
+        {
+            seq: 2,
+            id: 'evt-completed',
+            runId: 'run-1',
+            type: 'tool_call_completed',
+            payload: { callId: 'call-mcp', toolId, name: 'workspace.finish' },
+        },
+    ];
+
+    const items = presenter.timelineItemsFromEvents(events);
+    assert.deepEqual(items.map(item => item.type), ['tool_call_completed']);
+    assert.equal(items[0].kind, 'tool');
 });
 
 test('Agent run tool labels stay user-facing in timeline projection', async () => {
@@ -3361,6 +3525,7 @@ test('Agent run event presenter derives lazy detail targets from journal refs', 
         type: 'tool_call_completed',
         payload: {
             callId: 'call-1',
+            toolId: 'builtin:workspace.write_file',
             name: 'workspace.write_file',
             resourceRefs: ['output/main.md'],
         },
@@ -3418,6 +3583,7 @@ test('Agent run event presenter derives lazy detail targets from journal refs', 
         type: 'tool_call_requested',
         payload: {
             callId: 'call-2',
+            toolId: 'builtin:workspace.apply_patch',
             name: 'workspace.apply_patch',
             argumentsRef: 'tool-args/call-2.json',
         },
@@ -3429,6 +3595,7 @@ test('Agent run event presenter derives lazy detail targets from journal refs', 
         type: 'tool_call_completed',
         payload: {
             callId: 'call-2',
+            toolId: 'builtin:workspace.apply_patch',
             name: 'workspace.apply_patch',
             resourceRefs: ['output/main.md'],
         },
@@ -3481,6 +3648,7 @@ test('Agent run event presenter keeps model turns out of timeline and exposes re
         payload: {
             round: 2,
             callId: 'call-1',
+            toolId: 'builtin:workspace.read_file',
             name: 'workspace.read_file',
         },
     };
@@ -3592,6 +3760,7 @@ test('Agent run event presenter restores reasoning for collapsed side-effect eve
         payload: {
             round: 7,
             callId: 'call-write',
+            toolId: 'builtin:workspace.write_file',
             name: 'workspace.write_file',
             resourceRefs: ['output/main.md'],
         },
@@ -3611,6 +3780,7 @@ test('Agent run event presenter restores reasoning for collapsed side-effect eve
         payload: {
             round: 7,
             callId: 'call-commit',
+            toolId: 'builtin:workspace.commit',
             name: 'workspace.commit',
             argumentsRef: 'tool-args/call-commit.json',
         },
@@ -3635,6 +3805,7 @@ test('Agent run event presenter restores reasoning for collapsed side-effect eve
         payload: {
             round: 7,
             callId: 'call-patch',
+            toolId: 'builtin:workspace.apply_patch',
             name: 'workspace.apply_patch',
             argumentsRef: 'tool-args/call-patch.json',
         },
@@ -3647,6 +3818,7 @@ test('Agent run event presenter restores reasoning for collapsed side-effect eve
         payload: {
             round: 7,
             callId: 'call-patch',
+            toolId: 'builtin:workspace.apply_patch',
             name: 'workspace.apply_patch',
             resourceRefs: ['output/main.md'],
         },
@@ -3666,6 +3838,7 @@ test('Agent run event presenter restores reasoning for collapsed side-effect eve
         payload: {
             round: 7,
             callId: 'call-finish',
+            toolId: 'builtin:workspace.finish',
             name: 'workspace.finish',
         },
     };
@@ -3716,7 +3889,7 @@ test('Agent run detail formatter renders tool result details without raw JSON sh
             sha256: '0123456789abcdef0123456789abcdef',
             text: JSON.stringify({
                 callId: 'call-1',
-                name: 'workspace.read_file',
+                toolId: 'builtin:workspace.read_file',
                 content: 'output/main.md lines 1-2 of 2, chars 0-11 of 11, words 2 of 2, sha256 abc\n1 hello\n2 world',
                 structured: {
                     path: 'output/main.md',
@@ -3836,6 +4009,7 @@ test('Agent run detail formatter renders model turn display DTO', async () => {
         }],
         toolCalls: [{
             callId: 'call-1',
+            toolId: 'builtin:workspace.read_file',
             name: 'workspace.read_file',
         }],
     };
@@ -3860,6 +4034,35 @@ test('Agent run detail formatter renders model turn display DTO', async () => {
     assert.equal(section.blocks[0].meta, 'reasoning_content · 30 chars / 5 words');
     assert.match(section.blocks[0].text, /Need to inspect/);
 
+});
+
+test('Agent run model turn detail distinguishes same-native external tools', async () => {
+    const { formatModelTurnDetail } = await importFresh('src/scripts/extensions/agent-system/src/run-detail-format.js');
+    const section = formatModelTurnDetail(
+        { type: 'modelTurn', labelKey: 'timelineModelTurn', round: 2 },
+        {
+            round: 2,
+            provider: {},
+            assistant: { text: '', totalChars: 0, totalWords: 0, truncated: false },
+            reasoning: [],
+            toolCalls: [
+                {
+                    callId: 'call-builtin',
+                    toolId: 'builtin:workspace.finish',
+                    name: 'workspace.finish',
+                },
+                {
+                    callId: 'call-mcp',
+                    toolId: 'mcp/registration-1:workspace.finish',
+                    name: 'workspace.finish',
+                },
+            ],
+        },
+    );
+
+    const calls = section.blocks.find(block => block.labelKey === 'timelineModelToolCalls');
+    assert.match(calls.text, /1\. finishing the run call-builtin/);
+    assert.match(calls.text, /2\. finishing the run \[mcp\/registration-1:workspace\.finish\] call-mcp/);
 });
 
 test('Agent run detail formatter renders model turn narration DTO', async () => {
@@ -3895,6 +4098,7 @@ test('Agent run detail formatter renders model turn narration DTO', async () => 
         }],
         toolCalls: [{
             callId: 'call-1',
+            toolId: 'builtin:workspace.finish',
             name: 'workspace.finish',
         }],
     };

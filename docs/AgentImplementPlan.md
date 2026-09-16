@@ -1,12 +1,12 @@
-# TauriTavern Agent Implementation Plan
+# TauriTavern Agent 实施说明
 
-本文档记录当前可继续开发的实施基线与后续顺序。历史施工计划已经收敛为当前架构、测试与契约；第 8 节只保留 Phase 台账用于追踪，不作为旧行为的事实来源。
+本文档记录 Agent 的当前实现、守护项和待办能力。历史施工计划已经收敛为当前架构、测试与契约；第 8 节按能力域归档，不作为旧行为的事实来源。
 
 当前事实以 `docs/CurrentState/AgentFramework.md` 为准，架构边界以 `docs/AgentArchitecture.md` 与 `docs/AgentContract.md` 为准。
 
 ## 1. 当前基线
 
-截至 2026-05-27，Agent 当前核心已经落地：
+截至 2026-07-31，Agent 当前核心已经落地：
 
 - Rust 后端拥有 Agent domain model、runtime、workspace、journal、checkpoint、commit bridge。
 - 聊天删除会清理对应 Agent chat workspace；active run 存在时删除 fail-fast。
@@ -19,10 +19,11 @@
 - Agent runtime 已使用 canonical model IR，不再把 OpenAI-compatible raw JSON 当作运行时事实。
 - `provider_state` 已用于 run-scoped continuation。OpenAI Responses 通过它驱动 persistent WebSocket、incremental input 与 `previous_response_id`。
 - Agent Skill repository/service、导入导出、embedded skill 导入确认、`api.skill`、`skill.list` / `skill.search` / `skill.read` 已落地。
-- Phase 3 Agent Profile 基线已落地：built-in `default-writer`、file repository、resolver、run snapshot、tool/skill/workspace/output policy、tool budget 与 max rounds。
+- Agent Profile 基线已落地：built-in `default-writer`、file repository、resolver、run snapshot、tool/skill/workspace/output policy、tool budget 与 max rounds。
 - Profile `preset.mode = "ref"` 可加载独立 OpenAI/chat-completion preset；`model.mode = "connectionRef"` + `modelId` 可通过 LLM Connection 解耦 preset source/model，并在 runtime 发送前再次权威覆盖 payload。
 - Profile `run.modelRetry` 已落地，默认对单次模型调用的 rate limit / transient transport-provider 错误重试 3 次，间隔 3000ms；非瞬时契约错误继续 fail-fast。
 - `instructions.agentSystemPrompt` 可完整替换默认 Agent system prompt；缺省时使用 resolved profile 默认 prompt。Preset / PromptManager 控制其位置与 role；前端在该位置 materialize Profile 内容，runtime 只消费最终 messages。`tools.toolDescriptions` 可替换 model-facing tool/property descriptions；缺省时使用默认描述。
+- 每个 root、return-mode child 与 handoff invocation 会从 builtin Catalog、resolved Profile 和 exit policy 编译 immutable tool snapshot 与最小 turn contract；child/handoff prompt、provider request、alias decode、dispatch membership 和 tool-call budget 共享该事实，并把完整 snapshot 写入 run workspace。root prompt preview 仍由启动前兼容桥生成，但使用同一 compiler。
 
 历史计划只保留为这些不变量：
 
@@ -98,13 +99,14 @@ AgentRuntimeService
 
 - `AgentModelGateway` 已从旧单文件拆成 `agent_model_gateway/` 模块目录：`mod.rs` 只保留 trait / wrapper，`encode.rs` / `decode.rs` / `format.rs` / `schema.rs` / `provider_state.rs` / `providers/*` 分别承担转换、格式解析、schema 清洗、continuation 与 provider-specific 规则。
 - provider format detection：OpenAI-compatible、OpenAI Responses、Claude Messages、Gemini、Gemini Interactions。
-- canonical tool specs 到 provider-facing function tools 的转换。
+- request-scoped `AgentModelTool` 到 provider-facing function tools 的转换。
 - provider-specific schema sanitizer。Gemini / Gemini Interactions 会移除当前不兼容的 JSON Schema 关键字；Claude 只做轻量清洗；OpenAI / Responses 保持完整 schema。
 - OpenAI Responses 请求自动 include `reasoning.encrypted_content`。
 - Agent OpenAI Responses 续接会使用 `provider_state.previousResponseId` 注入 `previous_response_id`，并用 `messageCursor` 只发送新消息。
 - Agent payload 内部字段 `_tauritavern_provider_state` 不进入 LLM API log，也不会发送给上游 provider。
 - missing `tool_call_id` fail-fast，不再 fallback 生成 `tool_call_{index}`。
 - response decode 保留 text、reasoning、tool calls、native metadata。
+- tool name 只通过当前 request 的 snapshot-bound alias 精确解析；canonical/raw/global registry fallback 已删除。
 
 仍待：
 
@@ -121,7 +123,7 @@ Provider native data 是 opaque state，不是 Agent 业务语义。Runtime 可�
 | --- | --- | --- |
 | Claude Messages | assistant `content` blocks，包含 `thinking` / `tool_use` / signature | Claude payload message conversion |
 | Gemini | response `content.parts`，包含 `thoughtSignature` | Makersuite payload message conversion |
-| Gemini Interactions | raw `outputs` | Gemini Interactions payload message conversion |
+| Gemini Interactions | raw `steps` | Gemini Interactions payload message conversion |
 | OpenAI Responses | raw `output` items 与 `responseId` | Responses payload `input` items |
 
 约束：
@@ -132,7 +134,7 @@ Provider native data 是 opaque state，不是 Agent 业务语义。Runtime 可�
 
 ## 5. 当前工具集
 
-Tool registry 只产 canonical `AgentToolSpec`，不再暴露 OpenAI-shaped `openai_tools()`。
+Builtin 工具直接声明中性 `ToolDescriptor` 并构造 `ToolCatalog`；invocation compiler 再生成 frozen bindings 与 request-scoped `AgentModelTool`，不再维护全局 alias 或暴露 OpenAI-shaped `openai_tools()`。
 
 | Canonical name | Model alias | 类型 |
 | --- | --- | --- |
@@ -194,7 +196,9 @@ resolve Profile
   ↓
 initialize_run 写 manifest / prompt snapshot / resolved profile / workspace root
   ↓
-prepare_agent_tool_request 按 Profile 生成 AgentModelRequest 与 visible tool specs
+compile + persist invocation tool snapshot / turn
+  ↓
+prepare_agent_tool_request 从 turn 生成 AgentModelRequest 与 model-facing specs
   ↓
 model -> read-only context tools / skill tools / workspace tools -> model -> ... -> workspace.commit? -> workspace.finish
   ↓
@@ -209,11 +213,11 @@ workspace.finish 收尾并提交 persist projection
 
 工具循环轮数来自 `profile.tools.maxRounds`。超过后以 `agent.max_tool_rounds_exceeded` 失败。模型直接输出文本且不调用工具会捕获到 workspace `direct_output.md` 并触发 soft drift recovery；direct output recovery 没有独立的一次性上限，只要仍有下一轮模型调用预算就继续纠偏，直到恢复、取消或在 `maxRounds` 边界以 `model.tool_call_required` 失败 / `run_partial_success` 收口。前台 run 必须在 finish 前至少成功 commit 一次；后台 run 可以无 commit 完成。
 
-## 8. 后续实施顺序
+## 8. 能力台账
 
-本节按 Phase 台账追踪，便于提交与回归管理。已完成 Phase 只记录基线和守护项；后续开发从第一个未完成 Phase 继续。
+本节按能力域记录已经实现的边界、持续守护项和后续工作。
 
-### Phase 0：文档、契约、测试守护（已完成，持续维护）
+### 文档、契约与测试守护
 
 已完成：
 
@@ -224,7 +228,7 @@ workspace.finish 收尾并提交 persist projection
 
 - Agent 相关实现变更必须同步当前事实、架构边界、Host ABI、工具语义、workspace 语义与测试策略。
 
-### Phase 1：Workspace + Journal + One-Step Agent（已完成）
+### Workspace、Journal 与单步执行
 
 已完成：
 
@@ -232,15 +236,16 @@ workspace.finish 收尾并提交 persist projection
 - `api.agent.startRunFromLegacyGenerate()` / `startRunWithPromptSnapshot()` / subscribe / cancel / readEvents / commit bridge 已落地。
 - Agent Mode off 不改变 Legacy Generate、ToolManager、事件顺序与 chat 保存语义。
 
-### Phase 2A：Tool Loop Foundation（已完成）
+### 工具循环
 
 已完成：
 
 - Rust runtime 独占推进 tool loop，不递归调用前端 `Generate()`。
-- Tool registry 产 canonical `AgentToolSpec`，provider-facing alias 由 gateway 渲染。
+- Catalog + Profile/exit-policy compiler 产 immutable snapshot 与 turn；provider-facing spec 由该 turn 投影。
 - 工具调用、工具结果、recoverable tool error、fatal runtime error 与 journal 语义已落地。
+- Provider alias、dispatch membership 与调用预算绑定当前 invocation snapshot，不再重算 Profile visibility。
 
-### Phase 2B：Workspace 读改工具（已完成）
+### Workspace 读写工具
 
 已完成：
 
@@ -248,7 +253,7 @@ workspace.finish 收尾并提交 persist projection
 - workspace mutation 后创建 checkpoint；完整读取 / 写入 read-state 约束已接入。
 - `output/`、`scratch/`、`plan/`、`summaries/`、`persist/` 是当前模型可见 root。
 
-### Phase 2C：上下文只读工具（已完成）
+### 上下文只读工具
 
 已完成：
 
@@ -256,7 +261,7 @@ workspace.finish 收尾并提交 persist projection
 - `worldinfo.read_activated` 只读取本次 run 捕获的最终激活世界书条目。
 - 只读工具结果以 resource ref / snippet / tool result 回填模型，不写入 chat 楼层。
 
-### Phase 2D：Gateway / Provider Contract 硬化（已完成基线，持续守护）
+### Gateway / Provider 契约
 
 结论：`Gateway / Provider Contract 硬化` 不应继续列为未完成主任务。当前基线已经完成；后续只按守护项补测试和防回退。
 
@@ -274,7 +279,7 @@ workspace.finish 收尾并提交 persist projection
 - 继续扩展 schema sanitizer edge case、session close、prompt cache 与 provider-native state 共存测试。
 - 新 provider adapter 必须保持 native metadata opaque，不得清洗签名、encrypted reasoning 或 tool call id。
 
-### Phase 2E：Skill 管理与读取（已完成基线）
+### Skill 管理与读取
 
 已完成：
 
@@ -282,9 +287,9 @@ workspace.finish 收尾并提交 persist projection
 - `skill.list` / `skill.search` / `skill.read` 已接入 Agent tool registry。
 - Preset / Character embedded source refs 与删除清理语义已落地。
 
-Phase 3 基线已在 Agent tool 层接入 Skill 可见性、deny policy 与 read budget；Phase 2E 不再扩展 Skill 运行权限。
+Agent tool 层已接入 Skill 可见性、deny policy 与 read budget；Skill 管理与读取本身不再扩展运行权限。
 
-### Phase 3：Profile / Context / Skill Policy（进行中）
+### Profile / Context / Skill Policy
 
 目标：让创作者控制模型、工具、预算和上下文，而不是写死在 runtime。
 
@@ -306,7 +311,7 @@ Phase 3 基线已在 Agent tool 层接入 Skill 可见性、deny policy 与 read
 - preset / character author resources 复用 Skill-like 索引与 source ref 语义，不另建平行资源系统。
 - Plan node 若锁定 profile，runtime 必须拒绝模型自行切换。
 
-### Phase 4：Timeline UI 与人工控制
+### Timeline UI 与人工控制
 
 目标：给创作者可理解、可暂停、可提交的 Agent run 体验。
 
@@ -319,7 +324,7 @@ Phase 3 基线已在 Agent tool 层接入 Skill 可见性、deny policy 与 read
 - commit preview 与手动提交。
 - cancel UI。
 
-### Phase 5：Diff / Rollback / Resume
+### Diff / Rollback / Resume
 
 目标：让多轮创作具备可控回退能力。
 
@@ -329,7 +334,7 @@ Phase 3 基线已在 Agent tool 层接入 Skill 可见性、deny policy 与 read
 - `rollback()`：先只恢复 run workspace，不修改已提交聊天消息。
 - `resumeRun()`：明确 run continuation 语义，避免复用已 closed run 的状态机。
 
-### Phase 6：MCP / Extension Tool
+### MCP / Extension Tool
 
 目标：引入外部工具生态，但保持 Tauri-native 安全边界。
 
@@ -367,7 +372,7 @@ cargo test --manifest-path src-tauri/Cargo.toml normalize_
 ```bash
 pnpm run check:types
 pnpm run check:frontend
-pnpm run check:contracts
+pnpm run test:contracts
 ```
 
 ## 10. 每次修改必须同步的文档

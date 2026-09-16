@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
+import * as streamingPolicy from '../src/scripts/tauri/perf/streaming-render-policy.js';
 
 const source = fs.readFileSync(new URL('../src/scripts/reasoning.js', import.meta.url), 'utf8');
 const ast = ts.createSourceFile('reasoning.js', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
@@ -29,7 +30,7 @@ function fixture({ hidden = false, autoExpand = false } = {}) {
     const chat = [{ mes: '', extra: {} }];
     const power_user = { reasoning: { auto_parse: true, prefix: '<think>', suffix: '</think>', auto_expand: autoExpand } };
     const context = vm.createContext({
-        Date: Clock, console, chat, HTMLElement: Element, HTMLDetailsElement: Object,
+        Date: Clock, console, chat, HTMLElement: Element, HTMLDetailsElement: Object, ...streamingPolicy,
         document: { querySelector: () => message, querySelectorAll: () => [details],
             getElementById: () => ({ getBoundingClientRect: () => ({ bottom: 100 }) }),
             createElement: () => ({ classList: { add() {} }, value: '', focus() {}, setSelectionRange() {}, getBoundingClientRect: () => ({ bottom: 0 }) }) },
@@ -48,7 +49,8 @@ function fixture({ hidden = false, autoExpand = false } = {}) {
         getCurrentLocale: () => 'en', eventSource: { emit: async () => {} }, event_types: {},
         translate: x => x,
     });
-    vm.runInContext(declaration.getText(ast).replace(/^export /, '') + '\nglobalThis.Handler = ReasoningHandler;\n'
+    vm.runInContext(ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name.text === 'setDatasetPropertyIfChanged').getText(ast) + '\n'
+        + declaration.getText(ast).replace(/^export /, '') + '\nglobalThis.Handler = ReasoningHandler;\n'
         + toggleDeclaration.getText(ast) + '\n' + updateDeclaration.getText(ast).replace(/^export /, ''), context);
     return { context, handler: new context.Handler(), details, content, chat, message, power_user, editors,
         redraw: () => context.updateReasoningUI(message), toggleAutoExpand: context.toggleReasoningAutoExpand,
@@ -111,7 +113,7 @@ function controls(f, blocks = [f.details]) {
             return { start, end };
         },
         isTrueBoolean: value => value === 'true', isFalseBoolean: value => value === 'false',
-        saveChatConditional: async () => {}, closeMessageEditor() {},
+        saveChatConditional: async () => {}, closeMessageEditor() {}, syncChatSurfaceProjectionHold() {},
         updateMessageBlock: () => f.handler.initHandleMessage(f.message),
     });
     const names = new Set(['setReasoningUserOpen', 'registerReasoningSlashCommands', 'setReasoningEventHandlers']);
@@ -186,7 +188,7 @@ for (const autoExpand of [false, true]) {
         await f.handler.finish(0);
         assert.equal(f.details.open, autoExpand);
         assert.equal(f.content.html, 'A public planning note');
-        assert.deepEqual(f.counts(), before);
+        assert.deepEqual(f.counts(), { formats: before.formats, writes: before.writes + 1 });
     });
 
     test(`explicit choices survive streaming and completion; reset restores Auto-Expand=${autoExpand}`, async () => {
@@ -577,7 +579,8 @@ test('unchanged reasoning skips formatting and completion renders the final rece
     assert.equal(f.content.html, 'First chunk plus received tail');
     assert.deepEqual(f.counts(), { writes: 2, formats: 2 });
     await f.handler.finish(0);
-    assert.deepEqual(f.counts(), { writes: 2, formats: 2 });
+    assert.deepEqual(f.counts(), { writes: 3, formats: 2 });
+    assert.equal(f.content.html, 'First chunk plus received tail');
 });
 
 for (const autoExpand of [false, true]) {

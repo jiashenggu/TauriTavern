@@ -1,0 +1,1602 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
+use tokio::sync::{RwLock, watch};
+
+use crate::dto::chat_completion_dto::{
+    ChatCompletionGenerateRequestDto, ChatCompletionStatusRequestDto,
+};
+use crate::errors::ApplicationError;
+use crate::services::hashing::hex_lower;
+use tt_domain::errors::DomainError;
+use tt_domain::ios_policy::{IosPolicyActivationReport, IosPolicyScope};
+use tt_domain::models::claude_model::supports_one_hour_prompt_cache;
+use tt_domain::models::settings::{PromptCacheTtl, TauriTavernSettings};
+use tt_ports::repositories::chat_completion_repository::{
+    CHAT_COMPLETION_PROVIDER_STATE_FIELD, ChatCompletionApiConfig, ChatCompletionCancelReceiver,
+    ChatCompletionNormalizationReport, ChatCompletionRepository, ChatCompletionSource,
+    ChatCompletionStreamSender,
+};
+use tt_ports::repositories::prompt_cache_repository::{PromptCacheKey, PromptCacheRepository};
+use tt_ports::repositories::secret_repository::SecretRepository;
+use tt_ports::repositories::settings_repository::SettingsRepository;
+
+mod additional_parameters;
+mod config;
+mod custom_api_format;
+mod custom_parameters;
+pub(crate) mod exchange;
+mod model_capabilities;
+mod payload;
+mod prompt_caching;
+mod prompt_caching_plan;
+
+use self::additional_parameters::AdditionalParameters;
+use self::exchange::{
+    ChatCompletionExchange, ChatCompletionProviderFormat, NormalizedChatCompletionResponse,
+};
+
+const OPENAI_SOURCE: &str = ChatCompletionSource::OpenAi.key();
+const VERTEXAI_PROMPT_CACHE_SESSION_HEADER: &str = "X-Vertex-Ai-Session-Id";
+const AGENT_STRUCTURAL_BODY_OVERRIDE_KEYS: &[&str] = &[
+    "messages",
+    "input",
+    "tools",
+    "tool_choice",
+    "previous_response_id",
+    CHAT_COMPLETION_PROVIDER_STATE_FIELD,
+];
+
+struct ChatCompletionExecution {
+    source: ChatCompletionSource,
+    provider_format: ChatCompletionProviderFormat,
+    body: Value,
+    normalization_report: ChatCompletionNormalizationReport,
+}
+
+pub struct ChatCompletionService {
+    chat_completion_repository: Arc<dyn ChatCompletionRepository>,
+    secret_repository: Arc<dyn SecretRepository>,
+    settings_repository: Arc<dyn SettingsRepository>,
+    prompt_cache_repository: Arc<dyn PromptCacheRepository>,
+    ios_policy: IosPolicyActivationReport,
+    active_streams: CancellationRegistry,
+    active_generations: CancellationRegistry,
+}
+
+impl ChatCompletionService {
+    pub fn new(
+        chat_completion_repository: Arc<dyn ChatCompletionRepository>,
+        secret_repository: Arc<dyn SecretRepository>,
+        settings_repository: Arc<dyn SettingsRepository>,
+        prompt_cache_repository: Arc<dyn PromptCacheRepository>,
+        ios_policy: IosPolicyActivationReport,
+    ) -> Self {
+        Self {
+            chat_completion_repository,
+            secret_repository,
+            settings_repository,
+            prompt_cache_repository,
+            ios_policy,
+            active_streams: CancellationRegistry::default(),
+            active_generations: CancellationRegistry::default(),
+        }
+    }
+
+    fn ios_policy_is_active(&self) -> bool {
+        self.ios_policy.scope == IosPolicyScope::Ios
+    }
+
+    fn ensure_chat_completion_source_allowed(
+        &self,
+        source: ChatCompletionSource,
+    ) -> Result<(), ApplicationError> {
+        if !self.ios_policy_is_active() {
+            return Ok(());
+        }
+
+        if self
+            .ios_policy
+            .capabilities
+            .llm
+            .chat_completion_sources
+            .allows_source(source)
+        {
+            return Ok(());
+        }
+
+        Err(ApplicationError::PermissionDenied(format!(
+            "iOS policy disabled chat completion source: {}",
+            source.key()
+        )))
+    }
+
+    fn ensure_endpoint_overrides_allowed_for_status(
+        &self,
+        source: ChatCompletionSource,
+        dto: &ChatCompletionStatusRequestDto,
+    ) -> Result<(), ApplicationError> {
+        if !self.ios_policy_is_active() {
+            return Ok(());
+        }
+
+        if self.ios_policy.capabilities.llm.endpoint_overrides {
+            return Ok(());
+        }
+
+        if source == ChatCompletionSource::Custom {
+            return Err(ApplicationError::PermissionDenied(
+                "iOS policy disabled capability: llm.endpoint_overrides".to_string(),
+            ));
+        }
+
+        let mut overridden = Vec::new();
+        if !dto.reverse_proxy.trim().is_empty() {
+            overridden.push("reverse_proxy");
+        }
+        if !dto.proxy_password.trim().is_empty() {
+            overridden.push("proxy_password");
+        }
+        if !dto.custom_url.trim().is_empty() {
+            overridden.push("custom_url");
+        }
+        let custom_include_headers = additional_parameters::normalize_custom_parameter_field(
+            &dto.custom_include_headers,
+            "custom_include_headers",
+        )?;
+        if !custom_include_headers.trim().is_empty() {
+            overridden.push("custom_include_headers");
+        }
+
+        if overridden.is_empty() {
+            return Ok(());
+        }
+
+        Err(ApplicationError::PermissionDenied(format!(
+            "iOS policy disabled capability: llm.endpoint_overrides (used: {})",
+            overridden.join(", ")
+        )))
+    }
+
+    fn ensure_endpoint_overrides_allowed_for_payload(
+        &self,
+        source: ChatCompletionSource,
+        payload: &Map<String, Value>,
+    ) -> Result<(), ApplicationError> {
+        if !self.ios_policy_is_active() {
+            return Ok(());
+        }
+
+        if self.ios_policy.capabilities.llm.endpoint_overrides {
+            return Ok(());
+        }
+
+        if source == ChatCompletionSource::Custom {
+            return Err(ApplicationError::PermissionDenied(
+                "iOS policy disabled capability: llm.endpoint_overrides".to_string(),
+            ));
+        }
+
+        let mut overridden = Vec::new();
+        for key in ["reverse_proxy", "proxy_password", "custom_url"] {
+            let Some(value) = payload.get(key) else {
+                continue;
+            };
+
+            let value = value.as_str().ok_or_else(|| {
+                ApplicationError::ValidationError(format!(
+                    "Chat completion request field must be a string: {}",
+                    key
+                ))
+            })?;
+
+            if !value.trim().is_empty() {
+                overridden.push(key);
+            }
+        }
+
+        for key in [
+            "custom_include_body",
+            "custom_exclude_body",
+            "custom_include_headers",
+        ] {
+            let Some(value) = payload.get(key) else {
+                continue;
+            };
+
+            let value = additional_parameters::normalize_custom_parameter_field(value, key)?;
+
+            if !value.trim().is_empty() {
+                overridden.push(key);
+            }
+        }
+
+        if overridden.is_empty() {
+            return Ok(());
+        }
+
+        Err(ApplicationError::PermissionDenied(format!(
+            "iOS policy disabled capability: llm.endpoint_overrides (used: {})",
+            overridden.join(", ")
+        )))
+    }
+
+    fn ensure_chat_completion_features_allowed(
+        &self,
+        payload: &Map<String, Value>,
+    ) -> Result<(), ApplicationError> {
+        if !self.ios_policy_is_active() {
+            return Ok(());
+        }
+
+        if let Some(value) = payload.get("enable_web_search") {
+            let enabled = value.as_bool().ok_or_else(|| {
+                ApplicationError::ValidationError(
+                    "Chat completion request field must be a boolean: enable_web_search"
+                        .to_string(),
+                )
+            })?;
+
+            if enabled
+                && !self
+                    .ios_policy
+                    .capabilities
+                    .llm
+                    .chat_completion_features
+                    .web_search
+            {
+                return Err(ApplicationError::PermissionDenied(
+                    "iOS policy disabled capability: llm.chat_completion_features.web_search"
+                        .to_string(),
+                ));
+            }
+        }
+
+        let request_images_enabled = match payload.get("request_images") {
+            None => false,
+            Some(value) => value.as_bool().ok_or_else(|| {
+                ApplicationError::ValidationError(
+                    "Chat completion request field must be a boolean: request_images".to_string(),
+                )
+            })?,
+        };
+
+        let request_image_resolution = payload.get("request_image_resolution");
+        let request_image_aspect_ratio = payload.get("request_image_aspect_ratio");
+
+        let mut request_image_overrides = Vec::new();
+        for (key, value) in [
+            ("request_image_resolution", request_image_resolution),
+            ("request_image_aspect_ratio", request_image_aspect_ratio),
+        ] {
+            let Some(value) = value else {
+                continue;
+            };
+
+            let value = value.as_str().ok_or_else(|| {
+                ApplicationError::ValidationError(format!(
+                    "Chat completion request field must be a string: {}",
+                    key
+                ))
+            })?;
+
+            if !value.trim().is_empty() {
+                request_image_overrides.push(key);
+            }
+        }
+
+        if (request_images_enabled || !request_image_overrides.is_empty())
+            && !self
+                .ios_policy
+                .capabilities
+                .llm
+                .chat_completion_features
+                .request_images
+        {
+            let suffix = if request_image_overrides.is_empty() {
+                String::new()
+            } else {
+                format!(" (used: {})", request_image_overrides.join(", "))
+            };
+
+            return Err(ApplicationError::PermissionDenied(format!(
+                "iOS policy disabled capability: llm.chat_completion_features.request_images{}",
+                suffix
+            )));
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_status(
+        &self,
+        dto: ChatCompletionStatusRequestDto,
+    ) -> Result<Value, ApplicationError> {
+        if dto.bypass_status_check {
+            return Ok(json!({
+                "bypass": true,
+                "data": []
+            }));
+        }
+
+        let source = self.resolve_source(&dto.chat_completion_source)?;
+        self.ensure_chat_completion_source_allowed(source)?;
+        self.ensure_endpoint_overrides_allowed_for_status(source, &dto)?;
+        let model_list_source = resolve_status_model_list_source(source, &dto.custom_api_format)?;
+
+        if matches!(
+            source,
+            ChatCompletionSource::VertexAi | ChatCompletionSource::MiniMax
+        ) {
+            return Ok(json!({
+                "bypass": true,
+                "data": []
+            }));
+        }
+        let config =
+            config::resolve_status_api_config(source, &dto, &self.secret_repository).await?;
+
+        self.chat_completion_repository
+            .list_models(model_list_source, &config)
+            .await
+            .map_err(ApplicationError::from)
+    }
+
+    async fn execute_generate(
+        &self,
+        dto: ChatCompletionGenerateRequestDto,
+    ) -> Result<ChatCompletionExecution, ApplicationError> {
+        let source = self.resolve_source(
+            dto.get_string("chat_completion_source")
+                .unwrap_or(OPENAI_SOURCE),
+        )?;
+        self.ensure_chat_completion_source_allowed(source)?;
+        self.ensure_endpoint_overrides_allowed_for_payload(source, &dto.payload)?;
+        self.ensure_chat_completion_features_allowed(&dto.payload)?;
+        let additional_parameters = AdditionalParameters::from_payload(&dto.payload)?;
+        Self::ensure_agent_body_overrides_allowed(&dto.payload, &additional_parameters)?;
+        let provider_format = ChatCompletionProviderFormat::from_payload(source, &dto.payload)?;
+
+        let settings = self.load_tauritavern_settings().await?;
+        let prompt_caching_hints =
+            prompt_caching_plan::PromptCachingRequestHints::from_payload(&dto.payload)?;
+
+        let mut config = config::resolve_generate_api_config(
+            source,
+            &dto,
+            &additional_parameters,
+            &self.secret_repository,
+        )
+        .await?;
+        let model_hint = dto.get_string("model").map(str::to_string);
+        let payload = dto.payload;
+        let (endpoint_path, mut upstream_payload) = payload::build_payload(source, payload)?;
+        additional_parameters.apply_body_overrides(&mut upstream_payload)?;
+        self.apply_tauritavern_prompt_caching(
+            source,
+            &endpoint_path,
+            &mut config,
+            &settings,
+            &mut upstream_payload,
+            prompt_caching_hints,
+        )
+        .await?;
+        payload::validate_upstream_tool_transcript(&endpoint_path, &upstream_payload)?;
+        // Final provider-boundary cleanup; earlier stages should preserve prompt state.
+        sanitize_provider_bound_payload_before_llm_api(
+            &mut upstream_payload,
+            model_hint.as_deref(),
+            &endpoint_path,
+        );
+
+        let response = self
+            .chat_completion_repository
+            .generate(source, &config, &endpoint_path, &upstream_payload)
+            .await
+            .map_err(ApplicationError::from)?;
+
+        Ok(ChatCompletionExecution {
+            source,
+            provider_format,
+            body: response.body,
+            normalization_report: response.normalization_report,
+        })
+    }
+
+    pub(crate) async fn generate_exchange(
+        &self,
+        dto: ChatCompletionGenerateRequestDto,
+    ) -> Result<ChatCompletionExchange, ApplicationError> {
+        let execution = self.execute_generate(dto).await?;
+        let normalized_response = NormalizedChatCompletionResponse::from_value(execution.body)?;
+
+        Ok(ChatCompletionExchange {
+            source: execution.source,
+            provider_format: execution.provider_format,
+            normalized_response,
+            normalization_report: execution.normalization_report,
+        })
+    }
+
+    pub async fn generate_with_cancel(
+        &self,
+        dto: ChatCompletionGenerateRequestDto,
+        mut cancel: ChatCompletionCancelReceiver,
+    ) -> Result<Value, ApplicationError> {
+        let generation = self.execute_generate(dto);
+        tokio::pin!(generation);
+
+        let execution = tokio::select! {
+            result = &mut generation => result,
+            _ = cancel.changed() => {
+                if *cancel.borrow() {
+                    return Err(DomainError::generation_cancelled_by_user().into());
+                }
+
+                generation.await
+            }
+        }?;
+
+        Ok(execution.body)
+    }
+
+    pub(crate) async fn generate_exchange_with_cancel(
+        &self,
+        dto: ChatCompletionGenerateRequestDto,
+        mut cancel: ChatCompletionCancelReceiver,
+    ) -> Result<ChatCompletionExchange, ApplicationError> {
+        let generation = self.generate_exchange(dto);
+        tokio::pin!(generation);
+
+        tokio::select! {
+            result = &mut generation => result,
+            _ = cancel.changed() => {
+                if *cancel.borrow() {
+                    return Err(DomainError::generation_cancelled_by_user().into());
+                }
+
+                generation.await
+            }
+        }
+    }
+
+    pub async fn generate_stream(
+        &self,
+        dto: ChatCompletionGenerateRequestDto,
+        sender: ChatCompletionStreamSender,
+        cancel: ChatCompletionCancelReceiver,
+    ) -> Result<(), ApplicationError> {
+        let source = self.resolve_source(
+            dto.get_string("chat_completion_source")
+                .unwrap_or(OPENAI_SOURCE),
+        )?;
+        self.ensure_chat_completion_source_allowed(source)?;
+        self.ensure_endpoint_overrides_allowed_for_payload(source, &dto.payload)?;
+        self.ensure_chat_completion_features_allowed(&dto.payload)?;
+        let additional_parameters = AdditionalParameters::from_payload(&dto.payload)?;
+        Self::ensure_agent_body_overrides_allowed(&dto.payload, &additional_parameters)?;
+
+        let settings = self.load_tauritavern_settings().await?;
+        let prompt_caching_hints =
+            prompt_caching_plan::PromptCachingRequestHints::from_payload(&dto.payload)?;
+
+        let mut config = config::resolve_generate_api_config(
+            source,
+            &dto,
+            &additional_parameters,
+            &self.secret_repository,
+        )
+        .await?;
+        let model_hint = dto.get_string("model").map(str::to_string);
+        let payload = dto.payload;
+        let (endpoint_path, mut upstream_payload) = payload::build_payload(source, payload)?;
+        additional_parameters.apply_body_overrides(&mut upstream_payload)?;
+        self.apply_tauritavern_prompt_caching(
+            source,
+            &endpoint_path,
+            &mut config,
+            &settings,
+            &mut upstream_payload,
+            prompt_caching_hints,
+        )
+        .await?;
+        payload::validate_upstream_tool_transcript(&endpoint_path, &upstream_payload)?;
+        // Final provider-boundary cleanup; earlier stages should preserve prompt state.
+        sanitize_provider_bound_payload_before_llm_api(
+            &mut upstream_payload,
+            model_hint.as_deref(),
+            &endpoint_path,
+        );
+
+        self.chat_completion_repository
+            .generate_stream(
+                source,
+                &config,
+                &endpoint_path,
+                &upstream_payload,
+                sender,
+                cancel,
+            )
+            .await
+            .map_err(ApplicationError::from)
+    }
+
+    pub async fn register_stream(&self, stream_id: &str) -> watch::Receiver<bool> {
+        self.active_streams.register(stream_id).await
+    }
+
+    pub async fn cancel_stream(&self, stream_id: &str) -> bool {
+        self.active_streams.cancel(stream_id).await
+    }
+
+    pub async fn complete_stream(&self, stream_id: &str) {
+        self.active_streams.complete(stream_id).await;
+    }
+
+    pub async fn register_generation(&self, request_id: &str) -> watch::Receiver<bool> {
+        self.active_generations.register(request_id).await
+    }
+
+    pub async fn cancel_generation(&self, request_id: &str) -> bool {
+        self.active_generations.cancel(request_id).await
+    }
+
+    pub async fn complete_generation(&self, request_id: &str) {
+        self.active_generations.complete(request_id).await;
+    }
+
+    pub async fn close_provider_session(&self, session_id: &str) {
+        self.chat_completion_repository
+            .close_provider_session(session_id)
+            .await;
+    }
+
+    fn resolve_source(&self, raw: &str) -> Result<ChatCompletionSource, ApplicationError> {
+        ChatCompletionSource::parse(raw).ok_or_else(|| {
+            ApplicationError::ValidationError(format!(
+                "Unsupported chat completion source: {}",
+                raw
+            ))
+        })
+    }
+
+    async fn load_tauritavern_settings(&self) -> Result<TauriTavernSettings, ApplicationError> {
+        self.settings_repository
+            .load_tauritavern_settings()
+            .await
+            .map_err(ApplicationError::from)
+    }
+
+    fn ensure_agent_body_overrides_allowed(
+        payload: &Map<String, Value>,
+        additional_parameters: &AdditionalParameters,
+    ) -> Result<(), ApplicationError> {
+        if !payload.contains_key(CHAT_COMPLETION_PROVIDER_STATE_FIELD) {
+            return Ok(());
+        }
+
+        additional_parameters
+            .ensure_body_overrides_do_not_touch(AGENT_STRUCTURAL_BODY_OVERRIDE_KEYS)
+    }
+
+    async fn apply_tauritavern_prompt_caching(
+        &self,
+        source: ChatCompletionSource,
+        endpoint_path: &str,
+        config: &mut ChatCompletionApiConfig,
+        settings: &TauriTavernSettings,
+        upstream_payload: &mut Value,
+        hints: prompt_caching_plan::PromptCachingRequestHints,
+    ) -> Result<(), ApplicationError> {
+        let cache_ttl = settings.models.claude.prompt_cache_ttl;
+        if cache_ttl == PromptCacheTtl::Off {
+            return Ok(());
+        }
+
+        let ttl = match cache_ttl {
+            PromptCacheTtl::Off => return Ok(()),
+            PromptCacheTtl::FiveMinutes => "5m",
+            PromptCacheTtl::OneHour => "1h",
+        };
+
+        let plan = prompt_caching_plan::resolve_prompt_caching_plan(
+            source,
+            endpoint_path,
+            config,
+            upstream_payload,
+            hints,
+        )?;
+        let Some(plan) = plan else {
+            return Ok(());
+        };
+
+        if prompt_caching::contains_cache_control(upstream_payload) {
+            // User-supplied cache_control wins over automatic prompt caching.
+            if let prompt_caching_plan::PromptCachingPlan::VertexClaude { key, .. } = &plan {
+                apply_vertexai_prompt_cache_session_header(config, key);
+            }
+            return Ok(());
+        }
+
+        match plan {
+            prompt_caching_plan::PromptCachingPlan::Claude {
+                key,
+                anthropic_beta_header_mode,
+            } => {
+                let previous = self
+                    .prompt_cache_repository
+                    .load_prompt_digests(key.clone())
+                    .await
+                    .map_err(ApplicationError::from)?;
+                let snapshot = prompt_caching::apply_claude_prompt_caching(
+                    upstream_payload,
+                    previous.as_ref(),
+                    ttl,
+                );
+                self.prompt_cache_repository
+                    .save_prompt_digests(key, snapshot)
+                    .await
+                    .map_err(ApplicationError::from)?;
+                config.anthropic_beta_header_mode = anthropic_beta_header_mode;
+            }
+            prompt_caching_plan::PromptCachingPlan::OpenRouterClaude { key } => {
+                let previous = self
+                    .prompt_cache_repository
+                    .load_prompt_digests(key.clone())
+                    .await
+                    .map_err(ApplicationError::from)?;
+                let snapshot = prompt_caching::apply_openrouter_claude_prompt_caching(
+                    upstream_payload,
+                    previous.as_ref(),
+                    ttl,
+                );
+                self.prompt_cache_repository
+                    .save_prompt_digests(key, snapshot)
+                    .await
+                    .map_err(ApplicationError::from)?;
+            }
+            prompt_caching_plan::PromptCachingPlan::VertexClaude { key, model } => {
+                ensure_vertexai_claude_prompt_cache_ttl(ttl, &model)?;
+                let previous = self
+                    .prompt_cache_repository
+                    .load_prompt_digests(key.clone())
+                    .await
+                    .map_err(ApplicationError::from)?;
+                let snapshot = prompt_caching::apply_claude_explicit_prompt_caching(
+                    upstream_payload,
+                    previous.as_ref(),
+                    ttl,
+                );
+                self.prompt_cache_repository
+                    .save_prompt_digests(key.clone(), snapshot)
+                    .await
+                    .map_err(ApplicationError::from)?;
+                apply_vertexai_prompt_cache_session_header(config, &key);
+            }
+            prompt_caching_plan::PromptCachingPlan::NanoGptClaude => {
+                apply_nanogpt_claude_cache_control(upstream_payload, ttl);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn ensure_vertexai_claude_prompt_cache_ttl(ttl: &str, model: &str) -> Result<(), ApplicationError> {
+    if ttl == "1h" && !supports_one_hour_prompt_cache(model) {
+        return Err(ApplicationError::ValidationError(format!(
+            "Google Vertex AI Claude model {model} does not support 1h prompt cache TTL; use 5m or disable prompt caching."
+        )));
+    }
+
+    Ok(())
+}
+
+fn apply_vertexai_prompt_cache_session_header(
+    config: &mut ChatCompletionApiConfig,
+    key: &PromptCacheKey,
+) {
+    if !is_vertexai_global_location_base_url(&config.base_url)
+        || has_configured_header(config, VERTEXAI_PROMPT_CACHE_SESSION_HEADER)
+    {
+        return;
+    }
+
+    let digest_input = format!("{}|{:?}", config.base_url.trim(), key);
+    let digest = Sha256::digest(digest_input.as_bytes());
+    let session_id = format!("tt-pc-{}", &hex_lower(&digest)[..32]);
+    config
+        .extra_headers
+        .insert(VERTEXAI_PROMPT_CACHE_SESSION_HEADER.to_string(), session_id);
+}
+
+fn is_vertexai_global_location_base_url(base_url: &str) -> bool {
+    base_url
+        .trim()
+        .to_ascii_lowercase()
+        .contains("/locations/global")
+}
+
+fn has_configured_header(config: &ChatCompletionApiConfig, header_name: &str) -> bool {
+    config
+        .extra_headers
+        .keys()
+        .chain(config.additional_headers.keys())
+        .any(|key| key.eq_ignore_ascii_case(header_name))
+}
+
+fn resolve_status_model_list_source(
+    source: ChatCompletionSource,
+    custom_api_format: &str,
+) -> Result<ChatCompletionSource, ApplicationError> {
+    if source != ChatCompletionSource::Custom {
+        return Ok(source);
+    }
+
+    Ok(custom_api_format::CustomApiFormat::parse(custom_api_format)?.model_list_source())
+}
+
+fn apply_nanogpt_claude_cache_control(payload: &mut Value, ttl: &str) -> bool {
+    let is_claude = payload
+        .as_object()
+        .and_then(|object| object.get("model"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(prompt_caching_plan::is_nanogpt_claude_model_name);
+    if !is_claude {
+        return false;
+    }
+
+    let Some(object) = payload.as_object_mut() else {
+        return false;
+    };
+
+    object.insert(
+        "cache_control".to_string(),
+        json!({
+            "enabled": true,
+            "ttl": ttl,
+        }),
+    );
+
+    true
+}
+
+fn sanitize_provider_bound_payload_before_llm_api(
+    payload: &mut Value,
+    model_hint: Option<&str>,
+    endpoint_path: &str,
+) {
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+
+    let body_model = object
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    prune_empty_system_messages(object.get_mut("messages"));
+    trim_final_assistant_trailing_whitespace(object.get_mut("messages"));
+    if model_disallows_assistant_prefill(body_model.as_deref())
+        || model_disallows_assistant_prefill(model_hint)
+        || model_disallows_assistant_prefill(Some(endpoint_path))
+    {
+        normalize_core_message_roles(object.get_mut("messages"));
+        move_last_user_message_to_end(object.get_mut("messages"));
+    }
+
+    let remove_system = match object.get_mut("system") {
+        Some(system) => {
+            prune_empty_system_array_entries(system);
+            is_empty_system_value(system)
+        }
+        None => false,
+    };
+
+    if remove_system {
+        object.remove("system");
+    }
+}
+
+fn model_disallows_assistant_prefill(model: Option<&str>) -> bool {
+    let Some(model) = model else {
+        return false;
+    };
+    let model = normalize_model_for_assistant_prefill_match(model);
+    [
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+    ]
+    .iter()
+    .any(|unsupported_model| model.contains(unsupported_model))
+}
+
+fn normalize_model_for_assistant_prefill_match(model: &str) -> String {
+    model
+        .trim()
+        .to_ascii_lowercase()
+        .replace("%2e", ".")
+        .replace("%2d", "-")
+        .replace("%5f", "_")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn move_last_user_message_to_end(messages: Option<&mut Value>) {
+    let Some(Value::Array(entries)) = messages else {
+        return;
+    };
+
+    let Some(last_user_index) = entries.iter().rposition(is_user_message) else {
+        return;
+    };
+
+    if last_user_index + 1 == entries.len() {
+        return;
+    }
+
+    let last_user_message = entries.remove(last_user_index);
+    entries.push(last_user_message);
+}
+
+fn normalize_core_message_roles(messages: Option<&mut Value>) {
+    let Some(Value::Array(entries)) = messages else {
+        return;
+    };
+
+    for entry in entries {
+        let Some(object) = entry.as_object_mut() else {
+            continue;
+        };
+        let Some(role) = object.get("role").and_then(Value::as_str) else {
+            continue;
+        };
+
+        let normalized_role = match role.trim().to_ascii_lowercase().as_str() {
+            "system" => "system",
+            "user" => "user",
+            "assistant" => "assistant",
+            "tool" => "tool",
+            _ => continue,
+        };
+
+        object.insert(
+            "role".to_string(),
+            Value::String(normalized_role.to_string()),
+        );
+    }
+}
+
+fn is_user_message(message: &Value) -> bool {
+    message
+        .as_object()
+        .and_then(|object| object.get("role"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|role| role.eq_ignore_ascii_case("user"))
+}
+
+fn trim_final_assistant_trailing_whitespace(messages: Option<&mut Value>) {
+    let Some(Value::Array(entries)) = messages else {
+        return;
+    };
+
+    let Some(last) = entries.last_mut() else {
+        return;
+    };
+    let Some(object) = last.as_object_mut() else {
+        return;
+    };
+
+    let role_is_assistant = object
+        .get("role")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|role| role.eq_ignore_ascii_case("assistant"));
+    if !role_is_assistant {
+        return;
+    }
+
+    if let Some(content) = object.get_mut("content") {
+        trim_trailing_whitespace_from_content(content);
+    }
+}
+
+fn trim_trailing_whitespace_from_content(content: &mut Value) {
+    match content {
+        Value::String(text) => {
+            *text = trim_provider_text_end(text);
+        }
+        Value::Array(entries) => trim_trailing_whitespace_from_content_array(entries),
+        Value::Object(object) => {
+            if let Some(Value::String(text)) = object.get_mut("text") {
+                *text = trim_provider_text_end(text);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn trim_trailing_whitespace_from_content_array(entries: &mut Vec<Value>) {
+    while let Some(last) = entries.last_mut() {
+        match last {
+            Value::String(text) => {
+                *text = trim_provider_text_end(text);
+                if text.is_empty() {
+                    entries.pop();
+                    continue;
+                }
+                break;
+            }
+            Value::Object(object) => {
+                if let Some(Value::String(text)) = object.get_mut("text") {
+                    *text = trim_provider_text_end(text);
+                    if is_empty_system_object(object) {
+                        entries.pop();
+                        continue;
+                    }
+                }
+                break;
+            }
+            Value::Array(nested) => {
+                trim_trailing_whitespace_from_content_array(nested);
+                if nested.is_empty() {
+                    entries.pop();
+                    continue;
+                }
+                break;
+            }
+            Value::Null => {
+                entries.pop();
+            }
+            _ => break,
+        }
+    }
+}
+
+fn prune_empty_system_messages(messages: Option<&mut Value>) {
+    let Some(Value::Array(entries)) = messages else {
+        return;
+    };
+
+    entries.retain(|entry| !is_empty_system_message(entry));
+}
+
+fn is_empty_system_message(message: &Value) -> bool {
+    let Some(object) = message.as_object() else {
+        return false;
+    };
+
+    let role_is_system = object
+        .get("role")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|role| role.eq_ignore_ascii_case("system"));
+    if !role_is_system {
+        return false;
+    }
+
+    object.get("content").is_none_or(is_empty_system_value)
+}
+
+fn prune_empty_system_array_entries(system: &mut Value) {
+    let Value::Array(entries) = system else {
+        return;
+    };
+
+    entries.retain(|entry| !is_empty_system_value(entry));
+}
+
+fn is_empty_system_value(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(text) => is_blank_provider_text(text),
+        Value::Array(entries) => entries.iter().all(is_empty_system_value),
+        Value::Object(object) => is_empty_system_object(object),
+        _ => false,
+    }
+}
+
+fn is_empty_system_object(object: &Map<String, Value>) -> bool {
+    if object.is_empty() {
+        return true;
+    }
+
+    if object.get("type").and_then(Value::as_str) == Some("text") {
+        return object.get("text").is_none_or(is_empty_system_value);
+    }
+
+    if let Some(text) = object.get("text") {
+        let has_substantive_non_text_field = object.iter().any(|(key, value)| {
+            !matches!(key.as_str(), "text" | "type" | "cache_control")
+                && !is_empty_system_value(value)
+        });
+        return !has_substantive_non_text_field && is_empty_system_value(text);
+    }
+
+    object.values().all(is_empty_system_value)
+}
+
+fn is_blank_provider_text(text: &str) -> bool {
+    text.chars().all(is_provider_blank_char)
+}
+
+fn trim_provider_text_end(text: &str) -> String {
+    text.trim_end_matches(is_provider_blank_char).to_string()
+}
+
+fn is_provider_blank_char(character: char) -> bool {
+    character.is_whitespace()
+        || matches!(
+            character,
+            '\u{180E}' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}'
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::{
+        apply_nanogpt_claude_cache_control, apply_vertexai_prompt_cache_session_header,
+        ensure_vertexai_claude_prompt_cache_ttl, payload, resolve_status_model_list_source,
+        sanitize_provider_bound_payload_before_llm_api,
+    };
+    use tt_ports::repositories::chat_completion_repository::{
+        AnthropicBetaHeaderMode, ChatCompletionApiConfig, ChatCompletionSource,
+    };
+    use tt_ports::repositories::prompt_cache_repository::PromptCacheKey;
+
+    #[test]
+    fn nanogpt_claude_cache_control_is_inserted_for_claude_models() {
+        let mut payload = json!({
+            "model": "anthropic/claude-3-5-sonnet-latest",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+
+        assert!(apply_nanogpt_claude_cache_control(&mut payload, "5m"));
+
+        assert_eq!(
+            payload
+                .get("cache_control")
+                .and_then(Value::as_object)
+                .and_then(|cache_control| cache_control.get("enabled"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            payload
+                .get("cache_control")
+                .and_then(Value::as_object)
+                .and_then(|cache_control| cache_control.get("ttl"))
+                .and_then(Value::as_str),
+            Some("5m")
+        );
+    }
+
+    #[test]
+    fn nanogpt_claude_cache_control_is_skipped_for_non_claude_models() {
+        let mut payload = json!({
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+
+        assert!(!apply_nanogpt_claude_cache_control(&mut payload, "5m"));
+        assert!(payload.get("cache_control").is_none());
+    }
+
+    #[test]
+    fn vertexai_claude_rejects_one_hour_cache_for_old_models() {
+        let error = ensure_vertexai_claude_prompt_cache_ttl("1h", "claude-3-7-sonnet@20250219")
+            .expect_err("old model should reject 1h ttl");
+
+        assert!(error.to_string().contains("does not support 1h"));
+        ensure_vertexai_claude_prompt_cache_ttl("1h", "claude-sonnet-4-5@20250929")
+            .expect("modern model should allow 1h ttl");
+    }
+
+    #[test]
+    fn vertexai_global_prompt_cache_adds_session_header() {
+        let mut config = ChatCompletionApiConfig {
+            base_url: "https://aiplatform.googleapis.com/v1/projects/p/locations/global"
+                .to_string(),
+            api_key: String::new(),
+            authorization_header: None,
+            vertexai_service_account_json: None,
+            extra_headers: Default::default(),
+            additional_headers: Default::default(),
+            anthropic_beta_header_mode: AnthropicBetaHeaderMode::None,
+            aws_bedrock_custom_response_path: None,
+            aws_bedrock_custom_stream_path: None,
+        };
+        let key = PromptCacheKey::VertexAiClaude {
+            scope: "scope".to_string(),
+        };
+
+        apply_vertexai_prompt_cache_session_header(&mut config, &key);
+
+        assert!(config.extra_headers.contains_key("X-Vertex-Ai-Session-Id"));
+    }
+
+    #[test]
+    fn vertexai_regional_prompt_cache_skips_session_header() {
+        let mut config = ChatCompletionApiConfig {
+            base_url:
+                "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1"
+                    .to_string(),
+            api_key: String::new(),
+            authorization_header: None,
+            vertexai_service_account_json: None,
+            extra_headers: Default::default(),
+            additional_headers: Default::default(),
+            anthropic_beta_header_mode: AnthropicBetaHeaderMode::None,
+            aws_bedrock_custom_response_path: None,
+            aws_bedrock_custom_stream_path: None,
+        };
+        let key = PromptCacheKey::VertexAiClaude {
+            scope: "scope".to_string(),
+        };
+
+        apply_vertexai_prompt_cache_session_header(&mut config, &key);
+
+        assert!(!config.extra_headers.contains_key("X-Vertex-Ai-Session-Id"));
+    }
+
+    #[test]
+    fn custom_claude_messages_status_uses_claude_transport() {
+        let source =
+            resolve_status_model_list_source(ChatCompletionSource::Custom, "claude_messages")
+                .expect("status transport should resolve");
+        assert_eq!(source, ChatCompletionSource::Claude);
+    }
+
+    #[test]
+    fn custom_gemini_interactions_status_uses_makersuite_transport() {
+        let source =
+            resolve_status_model_list_source(ChatCompletionSource::Custom, "gemini_interactions")
+                .expect("status transport should resolve");
+        assert_eq!(source, ChatCompletionSource::Makersuite);
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_preserves_provider_built_prefill() {
+        for (source, model) in [
+            (ChatCompletionSource::DeepSeek, "deepseek-chat"),
+            (ChatCompletionSource::Claude, "claude-sonnet-4-5"),
+        ] {
+            let input = json!({
+                "model": model,
+                "messages": [
+                    { "role": "user", "content": "continue" },
+                    { "role": "assistant", "content": "partial reply" }
+                ],
+            });
+            let (endpoint_path, mut payload) =
+                payload::build_payload(source, input.as_object().unwrap().clone())
+                    .expect("provider payload should build");
+            let expected = payload["messages"].clone();
+
+            sanitize_provider_bound_payload_before_llm_api(
+                &mut payload,
+                Some(model),
+                &endpoint_path,
+            );
+
+            assert_eq!(payload["messages"], expected, "{model}");
+            let last = payload["messages"].as_array().unwrap().last().unwrap();
+            assert_eq!(last["role"], "assistant");
+            if source == ChatCompletionSource::DeepSeek {
+                assert_eq!(last["prefix"], true);
+            }
+        }
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_preserves_openai_tool_exchange_and_trailing_control() {
+        let mut payload = json!({
+            "model": "gpt-4o",
+            "messages": [
+                { "role": "user", "content": "check the weather" },
+                { "role": "assistant", "content": null, "tool_calls": [
+                    { "id": "call_1", "type": "function", "function": { "name": "weather", "arguments": "{}" } }
+                ] },
+                { "role": "tool", "tool_call_id": "call_1", "content": "sunny" },
+                { "role": "system", "content": "Return a concise summary" }
+            ],
+        });
+        let expected = payload.clone();
+        payload::validate_upstream_tool_transcript("/chat/completions", &payload).unwrap();
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        assert_eq!(payload, expected);
+        payload::validate_upstream_tool_transcript("/chat/completions", &payload).unwrap();
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_removes_blank_top_level_system_string() {
+        let mut payload = json!({
+            "model": "test-model",
+            "system": "   \n\t",
+            "messages": [{"role": "user", "content": "hello"}],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        assert!(
+            payload.get("system").is_none(),
+            "blank top-level system field must be removed before the API call"
+        );
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_prunes_empty_claude_system_blocks() {
+        let mut payload = json!({
+            "model": "claude-test",
+            "system": [
+                { "type": "text", "text": "" },
+                { "type": "text", "text": " \n " },
+                { "type": "text", "text": "keep me" }
+            ],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        let system = payload
+            .get("system")
+            .and_then(Value::as_array)
+            .expect("non-empty system block must remain");
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0]["text"], "keep me");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_removes_system_array_when_all_blocks_are_empty() {
+        let mut payload = json!({
+            "model": "claude-test",
+            "system": [
+                { "type": "text", "text": "" },
+                { "text": "", "cache_control": { "type": "ephemeral" } }
+            ],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        assert!(payload.get("system").is_none());
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_removes_empty_system_messages_for_litellm_bedrock() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-6",
+            "messages": [
+                { "role": "system", "content": "" },
+                { "role": "system", "content": [{ "type": "text", "text": "\u{200b}\n " }] },
+                { "role": "system", "content": "keep this" },
+                { "role": "user", "content": "hello" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "keep this");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_trims_final_assistant_string_content() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-5",
+            "messages": [
+                { "role": "user", "content": "continue" },
+                { "role": "assistant", "content": "partial reply \n\t" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        assert_eq!(payload["messages"][1]["content"], "partial reply");
+        assert_eq!(payload["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_trims_final_assistant_content_parts() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-5",
+            "messages": [
+                { "role": "assistant", "content": "older reply " },
+                { "role": "user", "content": "continue" },
+                {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "partial reply " },
+                        { "type": "text", "text": "\u{200b}\n" }
+                    ]
+                }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        assert_eq!(messages[0]["content"], "older reply ");
+        let final_content = messages[2]["content"]
+            .as_array()
+            .expect("final assistant content must remain array");
+        assert_eq!(final_content.len(), 1);
+        assert_eq!(final_content[0]["text"], "partial reply");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_trims_blank_final_assistant_without_removing_it() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-7",
+            "messages": [
+                { "role": "user", "content": "continue" },
+                { "role": "assistant", "content": " \u{200b}\n" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["content"], "");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_preserves_assistant_prefill_field_while_moving_user() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-7",
+            "assistant_prefill": "prefill",
+            "messages": [
+                { "role": "system", "content": "keep system" },
+                { "role": "user", "content": "continue" },
+                { "role": "assistant", "content": "partial reply \n" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        assert_eq!(payload["assistant_prefill"], "prefill");
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "partial reply");
+        assert_eq!(messages[2]["role"], "user");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_keeps_assistant_prefill_for_non_claude_model() {
+        let mut payload = json!({
+            "model": "gcp/google/gemini-3.7-flash",
+            "messages": [
+                { "role": "user", "content": "continue" },
+                { "role": "assistant", "content": "partial reply" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "assistant");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_uses_model_hint_or_endpoint_when_body_model_is_absent() {
+        for (hint, endpoint) in [
+            (Some("global.anthropic.claude-opus-4-6-v1:0"), ""),
+            (None, "/model/us.anthropic.claude-opus-4.7-v1:0/invoke"),
+            (None, "/model/anthropic.claude%2Dsonnet%2D4%2E6/invoke"),
+        ] {
+            let mut payload = json!({
+                "messages": [
+                    { "role": "user", "content": "continue" },
+                    { "role": "assistant", "content": "partial reply" }
+                ],
+            });
+            sanitize_provider_bound_payload_before_llm_api(&mut payload, hint, endpoint);
+            assert_eq!(payload["messages"][0]["role"], "assistant");
+            assert_eq!(payload["messages"][1]["role"], "user");
+        }
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_preserves_trailing_assistant_message_data() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-6",
+            "messages": [
+                { "role": "user", "content": "continue" },
+                {
+                    "role": "assistant",
+                    "content": "tool reply",
+                    "tool_calls": [{ "id": "call_1", "type": "function" }]
+                },
+                {
+                    "role": "assistant",
+                    "content": "native reply",
+                    "native": { "provider": "test" }
+                }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["native"]["provider"], "test");
+        assert_eq!(messages[2]["role"], "user");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_moves_last_user_after_trailing_controls_for_unsupported_claude() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-6",
+            "messages": [
+                { "role": "system", "content": "opening system" },
+                { "role": "user", "content": "older user" },
+                { "role": "assistant", "content": "older assistant" },
+                { "role": "user", "content": "latest user" },
+                { "role": "system", "content": "control one" },
+                { "role": "assistant", "content": "control assistant" },
+                { "role": "system", "content": "control two" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        let roles: Vec<_> = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            roles,
+            vec![
+                "system",
+                "user",
+                "assistant",
+                "system",
+                "assistant",
+                "system",
+                "user",
+            ]
+        );
+        assert_eq!(messages.last().unwrap()["content"], "latest user");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_lowercases_roles_when_moving_last_user_for_unsupported_claude() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-6",
+            "messages": [
+                { "role": "SYSTEM", "content": "opening system" },
+                { "role": "USER", "content": "older user" },
+                { "role": "assistant", "content": "older assistant" },
+                { "role": "USER", "content": "latest user" },
+                { "role": "assistant", "content": "control assistant" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        let roles: Vec<_> = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            roles,
+            vec!["system", "user", "assistant", "assistant", "user"]
+        );
+        assert_eq!(messages.last().unwrap()["content"], "latest user");
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_keeps_final_assistant_prefill_for_supported_claude() {
+        let mut payload = json!({
+            "model": "aws/anthropic/bedrock-claude-opus-4-5",
+            "assistant_prefill": "prefill",
+            "messages": [
+                { "role": "user", "content": "continue" },
+                { "role": "assistant", "content": "partial reply \n" }
+            ],
+        });
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        assert_eq!(payload["assistant_prefill"], "prefill");
+        let messages = payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages must remain");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["content"], "partial reply");
+        assert_eq!(messages[1]["role"], "assistant");
+    }
+}
+
+#[derive(Default)]
+struct CancellationRegistry {
+    active: RwLock<HashMap<String, watch::Sender<bool>>>,
+}
+
+impl CancellationRegistry {
+    async fn register(&self, request_id: &str) -> watch::Receiver<bool> {
+        let (sender, receiver) = watch::channel(false);
+        let mut active = self.active.write().await;
+
+        if let Some(previous_sender) = active.insert(request_id.to_string(), sender) {
+            let _ = previous_sender.send(true);
+        }
+
+        receiver
+    }
+
+    async fn cancel(&self, request_id: &str) -> bool {
+        let mut active = self.active.write().await;
+        let Some(sender) = active.remove(request_id) else {
+            return false;
+        };
+
+        let _ = sender.send(true);
+        true
+    }
+
+    async fn complete(&self, request_id: &str) {
+        let mut active = self.active.write().await;
+        active.remove(request_id);
+    }
+}

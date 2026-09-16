@@ -4,9 +4,9 @@ import test from 'node:test';
 
 const worldInfoSource = await readFile(new URL('../src/scripts/world-info.js', import.meta.url), 'utf8');
 
-test('world-info budget counting tokenizes each candidate instead of each growing prefix', () => {
-    assert.match(worldInfoSource, /let newContentTokens = await getTokenCountAsync\(allActivatedText\)/);
-    assert.match(worldInfoSource, /newContentTokens \+= await getTokenCountAsync\(entryContent\)/);
-    assert.match(worldInfoSource, /if \(!entry\.ignoreBudget && newContentTokens >= budget\)/);
-    assert.doesNotMatch(worldInfoSource, /getTokenCountAsync\(newContent\)/);
+test('world-info budget counting reuses upstream batched prefixes instead of rescanning each candidate', () => {
+    assert.match(worldInfoSource, /const textToScanTokens = await getTokenCountAsync\(allActivatedText\)/);
+    assert.match(worldInfoSource, /getTokenPrefixCountsAsync\(batchBaseContent, batchSuffixes, undefined, remainingBudget\)/);
+    assert.match(worldInfoSource, /prefetchedTokenCounts\.has\(entry\)\s*\? prefetchedTokenCounts\.get\(entry\)/);
+    assert.match(worldInfoSource, /if \(!entry\.ignoreBudget && \(textToScanTokens \+ newContentTokens\) >= budget\)/);
 });

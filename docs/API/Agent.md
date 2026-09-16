@@ -1,6 +1,6 @@
 # `window.__TAURITAVERN__.api.agent` — Agent API
 
-本文档是 Agent Host ABI 当前参考。它描述前端/扩展可见的稳定入口，不等同于 Rust 内部 service/repository。
+本文档是 Agent Host ABI 当前参考。Run 控制入口属于 Public Contract；明确标注为 Project Contract 的 UI/诊断投影可以随 Agent 实验能力演进，不等同于 Rust 内部 service/repository。
 
 状态：当前已实现 canonical model IR、provider native metadata 保真、provider_state continuation、上下文只读工具、Skill tools、workspace 读改工具循环、前端 dryRun adapter、Agent run history listing、Agent run retention facade / dry-run plan preview / manual apply prune / backend auto prune，以及 Agent Profile 独立 preset / 独立 model 的 Frontend PromptAssemblyBroker 链路。Agent System 扩展开关开启时，普通发送、`/trigger`、regenerate 与 overswipe 新候选生成会通过 Legacy Generate 兼容桥启动 Agent；普通切换已有 swipe 候选不启动 Agent。本文以当前已落地 Host ABI 为准，并在后续章节保留 readDiff/rollback/approval 等未来设计。
 
@@ -60,7 +60,7 @@ type TauriTavernAgentApi = {
     buildSnapshot(input: AgentPromptAssemblyBrokerRequest): Promise<AgentPromptAssemblyBuildResult>;
   };
   tools: {
-    list(): Promise<{ tools: AgentToolSpec[] }>;
+    list(): Promise<{ tools: AgentToolCatalogItem[] }>;
   };
 
   approveToolCall(): never;
@@ -384,7 +384,7 @@ type AgentWorkspaceFile = {
 路径必须是 workspace relative path。非法路径直接 reject。
 当前 Host ABI 只读当前 run workspace 的 UTF-8 文本文件，不支持 `checkpointId` 参数。模型侧读取应使用 `workspace_read_file` 工具，前端/扩展侧读取应使用本方法。
 
-## 10. readModelTurn
+## 10. readModelTurn（Project Contract）
 
 ```ts
 type AgentReadModelTurnInput = {
@@ -427,8 +427,9 @@ type AgentModelTurn = {
   }>;
   toolCalls: Array<{
     callId: string;
+    toolId: string;
     name: string;
-    modelName?: string;
+    modelAlias?: string;
   }>;
 };
 ```
@@ -459,7 +460,7 @@ type AgentPruneChatPersistentStatesResult = {
 
 `pruneChatPersistentStates()` 是消息/Swipe 删除后的 Host cleanup 入口，不是全量 GC。调用方必须显式传入从被删除消息或被删除 swipe metadata 中收集到的 `candidateStateIds`；缺失、非数组或空字符串 state id 必须 reject。
 
-后端会重新读取当前完整 chat payload，收集仍被当前聊天消息或 swipe 引用的 retained state ids，只删除 `candidateStateIds - retainedStateIds`。未被本次删除动作明确列为 candidate 的孤儿 state 必须保留，避免第三方总结、隐藏楼层、windowed save 或 metadata 损坏把整个 `persistent-states` 目录误清空。
+后端会重新读取当前完整 chat payload，收集仍被当前聊天消息或 swipe 引用的 retained state ids，只删除 `candidateStateIds - retainedStateIds`。未被本次删除动作明确列为 candidate 的孤儿 state 必须保留，避免第三方总结、隐藏楼层、并发消息修改或 metadata 损坏把整个 `persistent-states` 目录误清空。
 
 当前只支持 character chat；group chat persistent state prune 会 fail-fast。删除整个 chat / group chat 时，生命周期服务仍删除对应的完整 Agent chat workspace，这不是本方法的职责。
 
@@ -602,12 +603,11 @@ type AgentProfileDiagnostic = {
 
 `promptAssembly.prepare()` 调用 Rust `prepare_agent_prompt_assembly`，返回 `currentPromptSnapshot` 或 `frontendPromptAssembly`。`promptAssembly.buildSnapshot()` 是前端 broker：它只能使用 `frozenRunInputSnapshot` 内的 `promptInputs`、`worldInfoActivation`、`macroContext`，并调用真实 SillyTavern PromptManager 组装 `promptSnapshot.chatCompletionPayload`。该 API 是 Agent orchestration 内部边界，不是第三方扩展任意改写 prompt 的入口。
 
-### tools.list
+### tools.list（Project Contract）
 
 ```ts
-type AgentToolSpec = {
+type AgentToolCatalogItem = {
   name: string;
-  modelName: string;
   title: string;
   description: string;
   inputSchema: unknown;
@@ -617,7 +617,9 @@ type AgentToolSpec = {
 };
 ```
 
-`tools.list()` 返回当前后端 Agent Tool Registry 的 canonical specs。Profile 面板可以用它编辑 `tools.toolDescriptions`，但不得把返回值当作可修改的 registry。
+`tools.list()` 返回当前后端 Agent Tool Catalog 的 UI 投影。Profile 面板可以用它编辑 `tools.toolDescriptions`，但不得把返回值当作可修改的 catalog。Model alias 属于 invocation snapshot，不进入此 DTO。
+
+该 DTO 只服务当前 Agent Profile UI，不是跨来源 selector schema。MCP 工具进入 Profile 前，必须与 typed selector 迁移一起原子升级；不要向此 DTO 增加全局 alias 或 name fallback。
 
 ## 14. readDiff
 
@@ -681,9 +683,9 @@ Chat commit 不是公开 Host API 方法，而是 Agent tool 与 host bridge 的
 - 模型调用 `workspace.commit`，无参数时默认 `replace output/main.md`。
 - Rust runtime 读取 workspace 文件、校验 required message body、创建 checkpoint，并写 `chat_commit_requested` event。
 - 前端 host bridge 校验当前 active chat 与 run 的 `chatRef/stableChatId` 一致。
-- bridge 通过上游 `saveReply()` 写入聊天，再调用 `resolve_agent_chat_commit`。
+- bridge 先应用上游生成输出保存前后处理，再通过上游 `saveReply()` 写入聊天，最后调用 `resolve_agent_chat_commit`。
 - `chat_commit_requested` 不携带 `persistStateId`；该字段只能在 `workspace.finish` 成功提交 persistent state 后，由 `persistent_state_metadata_update_requested` / `resolve_agent_persistent_state_metadata_update` 写回同一条 chat message。
-- `replace` 后续使用 `appendFinal` 覆盖同一消息；`append` 后续使用 `append` 追加同一消息。
+- 首次 commit 按 generation type 创建或改写目标楼层；后续 commit 使用 `appendFinal` 写入完整 postprocessed 目标文本。`append` mode 会把本次读取到的文件文本作为 raw 追加贡献累计后再整体处理，避免片段级 regex。
 - `append` 在本 run 尚无 commit 时不会报错，会创建本 run 的消息楼层。
 - 前台 run 在 `workspace.finish` 前必须至少成功 commit 一次；后台 run 可无 chat commit 完成。
 
@@ -739,7 +741,7 @@ commit.save_failed
 
 ```text
 start_agent_run(dto)
-list_agent_tool_specs()
+list_agent_tools()
 cancel_agent_run(dto)
 list_agent_runs(dto)
 plan_agent_run_prune(dto)
@@ -794,7 +796,7 @@ Agent Mode on：
 | `workspace.read_file` | `workspace_read_file` | 读取 UTF-8 文本文件并返回行号；支持行范围和字符范围；完整读取记录 read-state |
 | `workspace.write_file` | `workspace_write_file` | 写 UTF-8 文本到 manifest 可写 roots；`mode` 默认为 `replace`，`append` 原样追加并在缺失时创建文件 |
 | `workspace.apply_patch` | `workspace_apply_patch` | 单文件 `old_string` / `new_string` 精确替换，要求已完整读取或由本 run 创建/修改 |
-| `workspace.commit` | `workspace_commit` | 提交可见 workspace 文件到当前聊天；无参数默认 replace `output/main.md`；append 首次创建、后续追加同一消息 |
+| `workspace.commit` | `workspace_commit` | 提交可见 workspace 文件到当前聊天；无参数默认 replace `output/main.md`；append 将本次读取到的文件文本追加到同一消息 |
 | `workspace.finish` | `workspace_finish` | 结束工具循环；前台 run 要求已有成功 commit，后台 run 可直接结束 |
 
 当前不存在 MCP、shell 或 extension bridge 工具。

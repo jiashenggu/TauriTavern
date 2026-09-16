@@ -6,6 +6,9 @@ import ts from 'typescript';
 import * as injections from '../src/scripts/prompt-injections.js';
 import * as orderUtils from '../src/scripts/prompt-manager-order-utils.js';
 import { exportZhaoweiPreset } from '../scripts/export-zhaowei-preset.mjs';
+import { createLatestTaskScheduler } from '../src/scripts/util/latest-task-scheduler.js';
+import { projectToolTurns } from '../src/scripts/tauritavern/tool-turn-projection.js';
+import { hasClaudeToolUse } from '../src/scripts/tauritavern/claude-native-stream.js';
 
 const raw = readFileSync(new URL('../docs/presets/照微.json', import.meta.url), 'utf8');
 const preset = JSON.parse(raw);
@@ -37,8 +40,10 @@ const assemblyCode = ['src/scripts/PromptManager.js', 'src/scripts/openai.js']
 function assemblyFixture(settings = preset) {
     const errors = [];
     const context = vm.createContext({
-        console: { debug() {}, log() {}, warn: (...args) => errors.push(args.join(' ')), error: (...args) => errors.push(args.join(' ')) },
-        structuredClone, setTimeout, clearTimeout, performance, ...injections, ...orderUtils,
+        console: { debug() {}, log: (...args) => args.filter(arg => arg?.stack || /^\[ChatCompletion\] \w*Error:/.test(String(arg)))
+            .forEach(arg => errors.push(String(arg?.stack ?? arg))),
+            warn: (...args) => errors.push(args.join(' ')), error: (...args) => errors.push(args.join(' ')) },
+        structuredClone, setTimeout, clearTimeout, performance, ...injections, ...orderUtils, createLatestTaskScheduler, projectToolTurns, hasClaudeToolUse,
         power_user: { console_log_prompts: true, pin_examples: false, persona_description_position: 0 },
         t: parts => Array.isArray(parts) ? parts.join('') : parts,
         debounce: f => f, debounce_timeout: { short: 0 }, getSortableDelay: () => 0,

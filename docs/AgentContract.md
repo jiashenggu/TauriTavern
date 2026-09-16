@@ -89,7 +89,7 @@ Provider adapter 只能把已经编译好的 `AgentModelRequest` / `ModelRequest
 
 禁止在 provider payload builder 中硬编码 TauriTavern Agent 的 prompt 结构。
 
-当前 Agent Gateway provider-specific 规则必须收敛在 `application/services/agent_model_gateway/providers/*` 与对应的 encode/decode/schema/provider_state 模块内，不能扩散到 runtime tool loop。
+当前 Agent Gateway provider-specific 规则必须收敛在 `crates/tt-application/src/services/agent_model_gateway/providers/*` 与对应的 encode/decode/schema/provider_state 模块内，不能扩散到 runtime tool loop。
 
 当前已落地的额外要求：
 
@@ -142,14 +142,14 @@ Plan policy violation 必须显式记录。模型可修正的工具请求可以�
 
 Agent commit 不能直接写 chat JSONL。
 
-必须通过现有 ChatService/ChatRepository 或前端既有保存队列等价路径保存，并遵守 windowed payload 语义：
+必须通过现有 ChatService/ChatRepository 或前端既有保存队列等价路径保存，并遵守完整 payload 语义：
 
-- UI 只持有 tail window。
-- Prompt/history backfill 不扩大 UI chat。
-- windowed save/patch 保持 cursor CAS 保护。
+- 前端 canonical `chat[]` 是完整、有序历史，Agent commit 不得建立第二套局部消息模型。
+- UI 的 DOM truncation 不改变数组内容或绝对索引。
+- 保存提交完整 header + 消息数组，并保留 integrity 校验与原子发布。
 - 应用内并发保存必须串行化。
 
-现有前端保存队列见 `src/script.js:536`。windowed payload 保存串行化要求见 `docs/CurrentState/WindowedPayload.md:151`。
+现有前端保存队列见 `src/script.js`。完整链路见 `docs/CurrentState/ChatPayload.md`。
 
 ### 1.8 Fail Fast，不静默降级
 
@@ -161,7 +161,7 @@ Agent commit 不能直接写 chat JSONL。
 - denied tool requested
 - plan locked node 被修改
 - hidden resource 被请求进入 context
-- cursor integrity conflict
+- chat payload integrity conflict
 - MCP stdio command 不在 allowlist
 - provider/source 被平台 policy 禁用
 - provider native metadata、tool call id 或 reasoning signature 被丢弃
@@ -171,7 +171,7 @@ Agent commit 不能直接写 chat JSONL。
 
 ### 1.9 LLM 调用必须复用现有服务边界
 
-Agent 第一阶段的 LLM 调用必须经过 `ChatCompletionService` 或它的正式 gateway wrapper。
+Agent 的 LLM 调用必须经过 `ChatCompletionService` 或它的正式 gateway wrapper。
 
 禁止：
 
@@ -200,10 +200,12 @@ Domain 可以定义：
 - `Checkpoint`
 - `AgentProfile`
 - `PlanPolicy`
-- `ToolSpec`
-- `ToolResult`
-- repository trait
-- gateway/dispatcher trait
+- `ToolId`
+- `ToolDescriptor`
+- `ToolInvocation`
+- `AgentToolResult`
+
+Repository、gateway 与 runtime port trait 属于 `tt-ports`；use case、compiler、gate 与 concrete builtin dispatcher 属于 `tt-application`。Domain 只定义纯模型和纯规则。
 
 Domain 禁止依赖：
 
@@ -305,9 +307,9 @@ dryRun 不能被视为纯函数。它仍会触发上游事件、prompt 组合、
 
 Agent run/timeline/tool event 不得伪装成上游 `GENERATION_*` 或 `TOOL_CALLS_*` 事件。上游事件属于 Legacy Generate 兼容面。
 
-## 5. Windowed Payload Contract
+## 5. Chat History 与 Save Contract
 
-Agent 读取历史必须优先使用后端 chat repository/windowed payload/search 能力。
+Agent 构建有界 context 时应优先使用后端 chat repository 的分页、定位与搜索能力，不应复制完整 JSONL 到 workspace。
 
 当前已落地的聊天上下文工具必须遵守：
 
@@ -315,14 +317,14 @@ Agent 读取历史必须优先使用后端 chat repository/windowed payload/sear
 - `chat.read_messages` 使用 0-based message index；JSONL header 不计入 index。
 - 两个工具必须读取 run 创建时冻结的输入历史前缀；`swipe` / `regenerate` 的目标楼层和本 run 后续写入楼层不得对当前 run 可见。
 - 长消息读取必须支持字符范围，不能强行把整条超长消息塞回 prompt。
-- 搜索/读取结果可以返回 snippet、text slice 与 stable ref，但不能扩大前端常驻 chat window。
+- 搜索/读取结果可以返回 snippet、text slice 与 stable ref，但不能另建一份前端 canonical chat。
 
 禁止：
 
-- 把完整 chat history 注入前端常驻 `chat`。
-- 为了 Agent 生成而扩大 UI window。
+- 用局部历史替换或裁剪前端 canonical `chat[]`。
+- 为了 Agent 生成而改变 UI 的 DOM truncation 状态。
 - 在 workspace 中复制完整 JSONL 作为默认行为。
-- 绕过 cursor integrity 直接覆盖聊天文件。
+- 绕过正式保存边界直接覆盖聊天文件。
 
 允许：
 
@@ -330,7 +332,7 @@ Agent 读取历史必须优先使用后端 chat repository/windowed payload/sear
 - 按 token budget 读取 tail/before/search。
 - 在 ContextFrame 中放入历史摘要或检索片段。
 
-`force` 只能用于既有 integrity 覆盖语义，不能跳过 cursor 签名校验。Cursor mismatch 代表 CAS 保护正在阻止不安全写入，不能被静默忽略。
+`force` 只能用于既有 integrity 覆盖语义。任何完整保存、原子发布或 integrity 错误都必须传播，不能被静默忽略。
 
 ## 6. Workspace Contract
 
@@ -380,28 +382,31 @@ GeneratedArtifact
 
 ## 7. Tool Contract
 
-工具必须有 `ToolSpec`：
+工具必须有 canonical `ToolId`（稳定 provider identity + source-native name）和 `ToolDescriptor`：
 
-- stable name
 - title/display name
 - description
 - input schema
 - optional output schema
-- visibility
-- permission
-- budget
-- source
 
-工具结果必须有 `ToolResult`：
+model-facing alias 不是工具身份。每个 invocation 必须从 Catalog + resolved Profile + 宿主 exit policy 编译一份 immutable `InvocationToolSnapshot`，冻结 descriptor、alias 与有效调用预算。当前 `ToolTurnContract` 只公开 `all(...)`，生产 compiler 使用 snapshot 全集与 `Auto`；逐轮动态收窄必须与 snapshot-based history alias resolution 原子引入。
+
+模型返回的 alias 必须属于当前 turn。Gateway 必须通过本次 request/turn 精确解析为包含 canonical `ToolId` 的 `ToolInvocation`；不得接受 canonical-name 直呼、其它 snapshot alias 或 global registry fallback。所有 Agent tool call 必须先经过同一个 invocation-local `ToolRequestGate`，完成 snapshot/turn/choice 再验证与预算预留，才能适配到 Agent runtime control handler 或 builtin dispatcher。预算耗尽返回模型可恢复的 tool result；contract violation 与缺失 executor/handler fail-fast。执行路径不得重新读取 Profile 推导授权。
+
+完整 snapshot 必须以 create-only 语义随 run 写入 `input/invocations/<invocation-id>/tool_snapshot.json`，重复写入 fail-fast；journal 记录其路径与 turn manifest，避免历史审计依赖 current registry。
+
+Agent 工具结果必须有 `AgentToolResult`：
 
 - call id
-- content blocks
+- canonical tool id
+- content
 - structured value
 - is_error
+- error code
 - resource refs
-- usage/cost/duration
 
 工具错误必须能被模型看到，也必须能被用户 timeline 看到。系统错误与模型可恢复错误应区分。
+结果进入 transcript 或审计存储前，call id 与 canonical tool id 必须和原始 `ToolInvocation` 一致；Provider alias 只能从当前 request 的 model-tool projection 反查。
 
 ## 8. MCP Contract
 
@@ -410,7 +415,7 @@ MCP 是独立模块，不依附 Agent Mode。
 Agent 可以消费 MCP：
 
 ```text
-MCP Tools     -> ToolRegistry
+MCP Tools     -> ToolCatalog contribution + executor route
 MCP Resources -> WorkspaceResource / ContextFrame
 MCP Prompts   -> PromptComponent
 ```

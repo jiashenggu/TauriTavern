@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createExtensionAssetLoader } from '../src/scripts/extensions/runtime/asset-loader.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const EXTENSIONS_ROOT = path.join(REPO_ROOT, 'src/scripts/extensions');
@@ -99,4 +100,112 @@ test('extensions are marked active only after activation hook call returns witho
 
     assert.ok(hookIndex >= 0, 'activate hook must be called');
     assert.ok(activeIndex > hookIndex, 'extension must become active after activate hook returns without throwing');
+});
+
+test('extension startup keeps resource loading at the activation boundary', async () => {
+    const [extensionsSource, scriptSource] = await Promise.all([
+        readFile(path.join(REPO_ROOT, 'src/scripts/extensions.js'), 'utf8'),
+        readFile(path.join(REPO_ROOT, 'src/script.js'), 'utf8'),
+    ]);
+
+    assert.doesNotMatch(extensionsSource, /modulepreload|resource-preloader|createExtensionResourcePreloader|prefetchExtensionResources/);
+    assert.doesNotMatch(scriptSource, /prefetch(?:StartupSystem|DeferredThirdParty)ExtensionResources/);
+});
+
+test('extension script loading waits for top-level await evaluation', async () => {
+    const originalDocument = globalThis.document;
+    const marker = `__tt_extension_ready_${Date.now()}_${Math.random()}`;
+    const elements = new Map();
+    const scriptUrl = `data:text/javascript,${encodeURIComponent(`
+        await new Promise(resolve => setTimeout(resolve, 10));
+        globalThis[${JSON.stringify(marker)}] = true;
+    `)}`;
+
+    globalThis.document = {
+        getElementById: id => elements.get(id) ?? null,
+        createElement: () => ({ dataset: {} }),
+        body: {
+            appendChild(script) {
+                elements.set(script.id, script);
+                queueMicrotask(() => script.onload());
+            },
+        },
+    };
+
+    try {
+        const loader = createExtensionAssetLoader({
+            sanitizeSelector: value => value.replaceAll('/', '_'),
+            getExtensionResourceUrl: () => scriptUrl,
+            isThirdPartyExtension: () => false,
+            resolveThirdPartyStylesheetUrl: async url => url,
+        });
+
+        await loader.addExtensionScript('third-party/top-level-await', { js: 'index.js' });
+
+        assert.equal(globalThis[marker], true);
+        assert.equal(elements.get('third-party_top-level-await-js').dataset.tauritavernLoaded, 'true');
+    } finally {
+        delete globalThis[marker];
+        if (originalDocument === undefined) {
+            delete globalThis.document;
+        } else {
+            globalThis.document = originalDocument;
+        }
+    }
+});
+
+test('extension discovery ignores stale force-refresh results before mutating globals', async () => {
+    const source = await readFile(path.join(REPO_ROOT, 'src/scripts/extensions.js'), 'utf8');
+    const start = source.indexOf('export function startOfflineExtensionsDiscovery');
+    assert.ok(start >= 0, 'startOfflineExtensionsDiscovery must exist');
+    const end = source.indexOf('async function prepareOfflineExtensionsActivation', start);
+    assert.ok(end > start, 'discovery section must end before preparation');
+
+    const section = source.slice(start, end);
+    const generationCaptureIndex = section.indexOf('const generation = offlineExtensionsDiscoveryGeneration;');
+    const staleGuardIndex = section.indexOf('if (generation !== offlineExtensionsDiscoveryGeneration)');
+    const commitIndex = section.indexOf('extensionNames = nextExtensionNames;');
+
+    assert.match(source, /let offlineExtensionsDiscoveryGeneration = 0;/);
+    assert.match(section, /offlineExtensionsDiscoveryGeneration \+= 1;/);
+    assert.ok(generationCaptureIndex >= 0, 'discovery generation must be captured per run');
+    assert.ok(staleGuardIndex > generationCaptureIndex, 'stale discovery guard must run after async discovery work');
+    assert.ok(commitIndex > staleGuardIndex, 'global discovery state must be committed only after stale guard');
+    assert.doesNotMatch(source, /manifestFetchPromises/);
+});
+
+test('extension discovery propagates API failures', async () => {
+    const source = await readFile(path.join(REPO_ROOT, 'src/scripts/extensions.js'), 'utf8');
+    const start = source.indexOf('async function discoverExtensions');
+    assert.ok(start >= 0, 'discoverExtensions must exist');
+    const end = source.indexOf('export function startOfflineExtensionsDiscovery', start);
+    assert.ok(end > start, 'discoverExtensions must end before startOfflineExtensionsDiscovery');
+    const section = source.slice(start, end);
+
+    assert.match(section, /if \(!response\.ok\)/);
+    assert.match(section, /throw new Error\(/);
+    assert.doesNotMatch(section, /return \[\]/);
+    assert.doesNotMatch(section, /catch\s*\(/);
+});
+
+test('extension manifest failures stay scoped to one extension', async () => {
+    const source = await readFile(path.join(REPO_ROOT, 'src/scripts/extensions.js'), 'utf8');
+
+    const manifestStart = source.indexOf('async function getManifests');
+    const manifestEnd = source.indexOf('/**\n * Tries to activate all available extensions', manifestStart);
+    assert.ok(manifestStart >= 0 && manifestEnd > manifestStart, 'getManifests section must exist');
+    const manifestSection = source.slice(manifestStart, manifestEnd);
+    assert.match(manifestSection, /!manifest \|\| typeof manifest !== 'object' \|\| Array\.isArray\(manifest\)/);
+    assert.match(manifestSection, /catch \(err\)/);
+
+    const activationStart = source.indexOf('const activateSingleExtension = async');
+    const activationEnd = source.indexOf('let currentGroup = [];', activationStart);
+    assert.ok(activationStart >= 0 && activationEnd > activationStart, 'single extension activation section must exist');
+    const activationSection = source.slice(activationStart, activationEnd);
+    const tryIndex = activationSection.indexOf('try {');
+    const decisionIndex = activationSection.indexOf('shouldActivateExtension({ name, manifest })');
+    assert.ok(
+        tryIndex >= 0 && decisionIndex > tryIndex,
+        'manifest semantics must be evaluated inside the per-extension error boundary',
+    );
 });

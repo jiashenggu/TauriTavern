@@ -19,6 +19,15 @@ export function isSegmenterSupported() {
  */
 export function segmentTextInElement(htmlElement, htmlContent, granularity = 'word') {
     htmlElement.innerHTML = htmlContent;
+    segmentExistingTextInElement(htmlElement, granularity);
+}
+
+/**
+ * Segments an already-parsed tree without parsing its HTML a second time.
+ * @param {HTMLElement} htmlElement
+ * @param {'word'|'grapheme'|'sentence'} [granularity='word']
+ */
+export function segmentExistingTextInElement(htmlElement, granularity = 'word') {
 
     if (!isSegmenterSupported()) {
         return;
@@ -79,10 +88,12 @@ export function finishStreamingMessageText(messageTextElement) {
     }
 }
 
-export function renderStreamingMessageText(messageTextElement, htmlContent, { fadeIn = false, isFinal = false } = {}) {
+export function renderStreamingMessageText(messageTextElement, htmlContent, { fadeIn = false, isFinal = false, render = null } = {}) {
     const userStates = Array.from(messageTextElement.querySelectorAll(STREAMING_DETAILS_SELECTOR), detail => detail.dataset.streamingUserOpen);
 
-    if (fadeIn) {
+    if (render) {
+        render();
+    } else if (fadeIn) {
         applyStreamFadeIn(messageTextElement, htmlContent);
     } else {
         messageTextElement.innerHTML = htmlContent;

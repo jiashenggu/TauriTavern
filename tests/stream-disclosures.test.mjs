@@ -83,6 +83,37 @@ test('a failed reasoning render does not prevent stream error cleanup', async ()
     assert.deepEqual(f.events, [{ event: 'received', open: false }, { event: 'rendered', open: false }]);
 });
 
+for (const fadeIn of [false, true]) {
+    for (const isFinal of [false, true]) {
+        test(`runtime-owned writes preserve draft choices, fadeIn=${fadeIn}, final=${isFinal}`, () => {
+            let drafts = [{ dataset: {}, open: true }, { dataset: { streamingUserOpen: 'true' }, open: true },
+                { dataset: { streamingUserOpen: 'false' }, open: false }];
+            let writes = 0;
+            let listeners = 0;
+            const host = {
+                querySelectorAll: () => drafts,
+                addEventListener() { listeners++; },
+                set innerHTML(_) { assert.fail('The runtime transaction must own the DOM write'); },
+            };
+            const context = vm.createContext({});
+            vm.runInContext(streamCode, context);
+            for (let i = 0; i < 2; i++) {
+                context.renderStreamingMessageText(host, '<details>draft</details>', {
+                    fadeIn, isFinal,
+                    render() {
+                        writes++;
+                        drafts = drafts.map(() => ({ dataset: {}, open: false }));
+                    },
+                });
+                assert.deepEqual(drafts.map(detail => detail.open), [!isFinal, true, false]);
+                assert.deepEqual(drafts.map(detail => detail.dataset.streamingUserOpen), [undefined, 'true', 'false']);
+            }
+            assert.equal(writes, 2);
+            assert.equal(listeners, 1);
+        });
+    }
+}
+
 for (const type of ['normal', 'impersonate']) {
     test(`${type}: stream failure before message rendering still unlocks generation`, async () => {
         const f = fixture(type, false);

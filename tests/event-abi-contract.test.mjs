@@ -76,15 +76,31 @@ test('TauriTavern keeps SETTINGS_LOADED in auto-fire events', async () => {
     );
 });
 
+test('first-class Tool rows keep tool events isolated from character message events', async () => {
+    const source = await readFile(path.join(REPO_ROOT, 'src/scripts/tool-calling.js'), 'utf8');
+    const start = source.indexOf('static async saveFunctionToolTurn');
+    const end = source.indexOf('\n    /**', start + 1);
+    assert.ok(start >= 0 && end > start);
+    const writer = source.slice(start, end);
+
+    assert.match(writer, /role:\s*\/\*\* @type \{const\} \*\/ \('tool'\)/);
+    assert.match(writer, /is_system:\s*true/);
+    assert.match(writer, /is_user:\s*false/);
+    assert.ok(writer.indexOf('chat.push(...toolMessages)') < writer.indexOf('event_types.TOOL_CALLS_PERFORMED'));
+    assert.match(writer, /event_types\.TOOL_CALLS_PERFORMED/);
+    assert.match(writer, /event_types\.TOOL_CALLS_RENDERED/);
+    assert.doesNotMatch(writer, /MESSAGE_RECEIVED|CHARACTER_MESSAGE_RENDERED/);
+});
+
 test('chat rename events use backend-committed normalized file names', async () => {
     const [script, welcomeScreen, route, chatCommand, groupCommand, chatService, groupService] = await Promise.all([
         readFile(path.join(REPO_ROOT, 'src/script.js'), 'utf8'),
         readFile(path.join(REPO_ROOT, 'src/scripts/welcome-screen.js'), 'utf8'),
         readFile(path.join(REPO_ROOT, 'src/tauri/main/routes/chat-routes.js'), 'utf8'),
-        readFile(path.join(REPO_ROOT, 'src-tauri/src/presentation/commands/chat_commands.rs'), 'utf8'),
-        readFile(path.join(REPO_ROOT, 'src-tauri/src/presentation/commands/group_chat_commands.rs'), 'utf8'),
-        readFile(path.join(REPO_ROOT, 'src-tauri/src/application/services/chat_service.rs'), 'utf8'),
-        readFile(path.join(REPO_ROOT, 'src-tauri/src/application/services/group_chat_service.rs'), 'utf8'),
+        readFile(path.join(REPO_ROOT, 'src-tauri/crates/tauritavern/src/presentation/commands/chat_commands.rs'), 'utf8'),
+        readFile(path.join(REPO_ROOT, 'src-tauri/crates/tauritavern/src/presentation/commands/group_chat_commands.rs'), 'utf8'),
+        readFile(path.join(REPO_ROOT, 'src-tauri/crates/tt-application/src/services/chat_service.rs'), 'utf8'),
+        readFile(path.join(REPO_ROOT, 'src-tauri/crates/tt-application/src/services/group_chat_service.rs'), 'utf8'),
     ]);
 
     assert.match(route, /const sanitizedFileName = await context\.safeInvoke\('rename_group_chat'/);

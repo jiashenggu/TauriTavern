@@ -39,17 +39,17 @@ MCP / Tool Direct Call
   非 Agent 模式下也可显式调用 MCP 或工具，但不拥有 Agent Run
 ```
 
-三条路径可以共享 LLM gateway、tool registry、MCP client、chat repository、windowed payload 和 tokenization service，但不能互相污染。
+三条路径可以共享 LLM gateway、Tool Catalog/control-plane primitives、MCP client、chat repository、只读历史查询和 tokenization service，但不能互相污染。
 
 ## 2. Ground of Truth
 
 本架构以当前仓库代码和文档为准：
 
-- 后端已经采用 Clean Architecture，依赖方向是外层依赖内层、内层定义接口、外层实现接口。见 `docs/BackendStructure.md:7`、`docs/BackendStructure.md:40`。
-- 应用服务由 `AppState` 管理并在 `bootstrap::build_services()` 装配。见 `src-tauri/src/app.rs:36`、`src-tauri/src/app/bootstrap.rs:150`。
-- 当前 LLM 请求经过 `ChatCompletionService`，该服务负责 provider 解析、iOS policy、endpoint override policy、payload build、prompt caching 和取消注册。见 `src-tauri/src/application/services/chat_completion_service/mod.rs:32`、`src-tauri/src/application/services/chat_completion_service/mod.rs:302`、`src-tauri/src/application/services/chat_completion_service/mod.rs:358`。
-- 当前 LLM API 日志依赖 bootstrap 中装配的 `LoggingChatCompletionRepository` wrapper；Agent 不得直接调用 `HttpChatCompletionRepository` 绕过日志、secret 或 policy。Responses WebSocket 建连已复用 `HttpClientPool` 的 ChatCompletion WebSocket profile，不应扩散成第二套 LLM 调用链。见 `src-tauri/src/app/bootstrap.rs:372`。
-- 当前 chat payload 分片读写由 `ChatService` 和 `ChatRepository` 承担，windowed save/patch 是正式契约。见 `src-tauri/src/application/services/chat_service.rs:495`、`src-tauri/src/application/services/chat_service.rs:563`、`src-tauri/src/domain/repositories/chat_repository.rs:145`、`src-tauri/src/domain/repositories/chat_repository.rs:162`。
+- 后端已经采用 workspace crate 边界：`tt-application` 依赖 `tt-ports/tt-contracts/tt-domain`，concrete IO 位于 `tt-adapter-*`，Tauri host 只负责 shell、composition、commands 与平台 glue。见 `docs/BackendStructure.md`。
+- 应用服务由 `AppState` 管理并在 `composition::build_services()` 装配。见 `src-tauri/crates/tauritavern/src/app.rs`、`src-tauri/crates/tauritavern/src/app/composition.rs`。
+- 当前 LLM 请求经过 `ChatCompletionService`，该服务负责 provider 解析、iOS policy、endpoint override policy、payload build、prompt caching 和取消注册。见 `src-tauri/crates/tt-application/src/services/chat_completion_service/mod.rs:32`、`src-tauri/crates/tt-application/src/services/chat_completion_service/mod.rs:302`、`src-tauri/crates/tt-application/src/services/chat_completion_service/mod.rs:358`。
+- 当前 LLM API 日志依赖 composition root 中装配的 `LoggingChatCompletionRepository` wrapper；Agent 不得直接调用 `HttpChatCompletionRepository` 绕过日志、secret 或 policy。Responses WebSocket 建连已复用 `HttpClientPool` 的 ChatCompletion WebSocket profile，不应扩散成第二套 LLM 调用链。见 `src-tauri/crates/tauritavern/src/app/composition/repositories.rs`。
+- 当前聊天遵循完整 payload 保存契约；`ChatService` / `GroupChatService` 通过正式 repository 边界提交，前端保存经过统一队列。tail/before 是与写入解耦的只读历史查询。见 `docs/CurrentState/ChatPayload.md`。
 - 前端 Public ABI 的统一入口是 `window.__TAURITAVERN__`，应保持小而稳定。见 `docs/FrontendHostContract.md` 第 3.6 节、`src/tauri/main/bootstrap.js:139`。
 - 当前 `Generate()` 支持 dryRun，并在 `GENERATE_AFTER_DATA` 提供生成请求数据。见 `src/script.js:4660`、`src/script.js:5743`。
 - 当前 SillyTavern 工具调用会递归回 `Generate()`，并把工具调用结果保存成 `is_system` chat message。这是 Agent 必须摆脱的旧结构。见 `src/script.js:5826`、`src/script.js:5847`、`src/script.js:5959`、`src/scripts/tool-calling.js:868`、`src/scripts/tool-calling.js:887`。
@@ -111,7 +111,7 @@ Agent Run State Machine
   ↓
 ArtifactAssembler
   ↓
-Committer 通过 chat service/windowed payload 保存
+Committer 通过正式 chat save contract 保存
   ↓
 聊天 UI 展示最终消息，timeline 展示 Agent 过程
 ```
@@ -122,7 +122,7 @@ Committer 通过 chat service/windowed payload 保存
 GenerationIntent
   ↓
 Rust ContextAssemblyService
-  ├─ chat history windowed read/search
+  ├─ chat history paged read/search
   ├─ world info activation result
   ├─ preset/character/user profile
   ├─ workspace files
@@ -142,7 +142,7 @@ LLM Gateway / provider adapter
 
 ### 5.1 当前落地边界
 
-截至 2026-05-02，当前已落地的是 canonical model IR + provider native metadata 保真 + provider_state continuation + 上下文只读工具 + workspace 读改工具循环，而不是完整 Agent 产品面：
+截至 2026-07-31，当前已落地的是 canonical model IR + provider native metadata 保真 + provider_state continuation + invocation tool snapshot/turn + 上下文只读工具 + workspace 读改工具循环，而不是完整 Agent 产品面：
 
 - Public Host ABI 入口为 `api.agent.startRunFromLegacyGenerate()` 与 `api.agent.startRunWithPromptSnapshot()`，没有 `startRun()` alias。
 - `startRunFromLegacyGenerate()` 是当前推荐的兼容桥；它捕获 Legacy prompt 语义与本轮最终 `worldInfoActivation`，同时禁用 Legacy ToolManager tools。
@@ -158,6 +158,7 @@ LLM Gateway / provider adapter
 - 当前模型可见 / 可写 workspace 根由 run manifest roots 驱动，默认包含 `output/`、`scratch/`、`plan/`、`summaries/`、`persist/`；`persist/` 是 chat workspace 级持久 root 的 run projection，`workspace.finish` 收尾成功后 promote 回稳定 chat workspace；`input/`、`tool-args/`、`tool-results/`、`model-responses/`、`checkpoints/` 与 `events.jsonl` 不作为模型工具资源暴露。
 - 工具循环最多 80 轮，必须以 `workspace.finish` 结束；前台 run 在 finish 前必须至少成功 `workspace.commit` 一次，后台 run 可无 chat commit；模型直接输出文本会捕获到 workspace `direct_output.md` 并触发 soft drift recovery，只要仍有下一轮模型调用预算就继续用合成 `user` 提醒纠偏，直到恢复、取消或 `maxRounds` 边界触发 fail-fast / partial-success。
 - 模型可修正的工具错误以 `is_error = true` tool result 回填下一轮；宿主级 IO、journal、checkpoint、序列化、取消和模型响应结构错误仍 fail-fast。
+- root、return-mode child 与 handoff invocation 各自冻结 `InvocationToolSnapshot` / `ToolTurnContract`；provider alias 只在当前 turn 内解析为 canonical `ToolInvocation`，唯一执行入口通过 invocation-local `ToolRequestGate` 检查 contract 并预留冻结预算，完整 manifest 随 run 持久化。
 - Skill profile policy、readDiff、rollback、resume-run、tool approval、profile routing、MCP、timeline UI、streaming Agent loop、主发送按钮 Agent toggle 仍未实现。
 
 ### 5.2 Run 与 Workspace 身份
@@ -178,9 +179,9 @@ chatRef       当前可定位引用，用于读取/commit guard
 建议模块边界：
 
 ```text
-src-tauri/src/
-  domain/
-    models/agent/
+src-tauri/
+  crates/
+    tt-domain/src/models/agent/
       run.rs
       event.rs
       workspace.rs
@@ -191,56 +192,56 @@ src-tauri/src/
       policy.rs
       tool.rs
       model.rs
-    repositories/
+
+    tt-ports/src/repositories/
       agent_run_repository.rs
       workspace_repository.rs
       checkpoint_repository.rs
       skill_repository.rs
       mcp_repository.rs
 
-  application/
-    dto/
-      agent_dto.rs
-      mcp_dto.rs
-    services/
-      agent_runtime/
-        mod.rs
-        run_state_machine.rs
-        context_assembly.rs
-        artifact_assembly.rs
-        commit.rs
-        profile_router.rs
-        plan.rs
-      workspace_service/
-      tool_registry_service/
-      tool_dispatch_service/
-      llm_gateway_service/
-      mcp_client_service/
-      skill_service/
+    tt-application/src/
+      dto/
+        agent_dto.rs
+        mcp_dto.rs
+      services/
+        agent_runtime/
+          mod.rs
+          run_state_machine.rs
+          context_assembly.rs
+          artifact_assembly.rs
+          commit.rs
+          profile_router.rs
+          plan.rs
+        workspace_service/
+        tool_registry_service/
+        tool_dispatch_service/
+        llm_gateway_service/
+        mcp_client_service/
+        skill_service/
 
-  infrastructure/
-    repositories/
-      file_agent_run_repository/
-      file_workspace_repository/
-      file_checkpoint_repository/
+    tt-adapter-storage-userdata/src/repositories/
+      file_agent_repository/
+      file_agent_profile_repository/
       file_skill_repository/
-    apis/
-      mcp/
-    diff/
+    tauritavern/src/infrastructure/
+      apis/
+      bundled_resources.rs
+      paths.rs
 
-  presentation/
-    commands/
-      agent_commands.rs
-      mcp_commands.rs
+    tauritavern/src/presentation/
+      commands/
+        agent_commands.rs
+        mcp_commands.rs
 ```
 
 关键规则：
 
 - `presentation` 只做 DTO 校验、权限/通道参数拆解、调用 application service、错误映射。
-- `application/services/agent_runtime` 是编排中心，但它不直接操作文件系统、不直接发 HTTP、不直接管理 MCP subprocess。
-- `domain` 定义纯模型与 repository/tool/gateway trait，不依赖 Tauri、tokio process、WebView、HTTP client。
+- `crates/tt-application/src/services/agent_runtime` 是编排中心，但它不直接操作文件系统、不直接发 HTTP、不直接管理 MCP subprocess。
+- `tt-domain` 定义纯模型与纯规则；repository/gateway/runtime trait 位于 `tt-ports`。两者都不依赖 Tauri、tokio process、WebView 或 HTTP client implementation。
 - `infrastructure` 实现文件存储、MCP client、diff、外部 API 适配。
-- 新服务必须在 `bootstrap::build_services()` 装配，并挂入 `AppState`，与现有服务生命周期一致。
+- 新服务必须在 `composition::build_services()` 装配，并挂入 `AppState`，与现有服务生命周期一致。
 
 ## 7. 运行时核心组件
 
@@ -292,14 +293,18 @@ Gateway 代码已拆成 `agent_model_gateway/` 模块目录：`mod.rs` 保留 tr
 
 当前 `ChatCompletionStreamEvent::Chunk` 只是 provider SSE `data` 字符串的桥接，不是 Agent timeline 语义事件。Agent 必须定义自己的 `AgentRunEvent`，不能把 provider stream chunk 当作 run event。
 
-### 7.5 ToolRegistryService / ToolDispatchService
+### 7.5 Tool Catalog / Snapshot Compiler / Tool Dispatch
 
 职责：
 
-- 注册内置工具、MCP 工具、未来 extension bridge 工具。
-- 根据 profile/preset/plan/run policy 解析可见工具与审批要求。
+- 聚合内置工具、MCP 工具、未来 extension bridge 工具。
+- 根据宿主拥有的 profile/plan/run facts 编译 immutable invocation snapshot。
+- 从 snapshot 编译当前 turn 的 advertised/requestable tools 与 typed choice。
+- 只通过当前 turn 的 alias manifest 解析模型调用。
 - 派发 tool call。
 - 把 tool result 写入 journal 与 context store，不写入 chat message。
+
+当前 builtin Agent vertical slice 已通过 domain types、application pure compiler 与 invocation-local Request Gate 落地，没有为了单一 registry/dispatcher 新增 service trait、factory 或 router。Approval 与多 executor router 等到出现真实 consumer 时再落地。
 
 详见 `docs/Agent/ToolSystem.md`。
 
@@ -312,9 +317,9 @@ Gateway 代码已拆成 `agent_model_gateway/` 模块目录：`mod.rs` 保留 tr
 - 通过现有 chat 保存路径提交。
 - commit 后写入 `agentRunId`、`agentCheckpointId`、`agentArtifacts` 等 metadata。
 
-Commit 必须遵守 windowed payload 与保存串行化契约，不能直接写 JSONL 文件。
+Commit 必须遵守完整 chat payload 与保存串行化契约，不能直接写 JSONL 文件。
 
-如果第一期由前端完成 commit，必须复用现有 `enqueueChatSave()` 串行化路径。如果后续改为后端直接 commit，后端必须提供等价的 per-chat 串行化、cursor/CAS/resync 语义，并仍通过 ChatService/GroupChatService 的正式保存边界。
+如果第一期由前端完成 commit，必须复用现有 `enqueueChatSave()` 串行化路径。如果后续改为后端直接 commit，后端必须提供等价的 per-chat 串行化、integrity 校验与原子发布语义，并仍通过 ChatService/GroupChatService 的正式保存边界。
 
 ## 8. 前端边界
 
@@ -404,7 +409,7 @@ SillyTavern 上游的事件和 chat message 结构仍是兼容层的基础。Age
 
 ## 11. 性能策略
 
-- Chat history 默认是 virtual resource，通过 Rust chat repository/windowed payload 按需读取。
+- Agent context 中的 chat history 默认是 virtual resource，通过 Rust chat repository 的分页、定位与搜索能力按需读取。
 - Workspace 不复制完整历史、完整世界书、完整记忆库。
 - Context assembly 必须有 token/resource budget。
 - Tool result 进入 journal 后，进入 prompt 前可以摘要、裁剪或按需读取。
