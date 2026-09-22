@@ -53,9 +53,10 @@ function assertPayloadArray(payload) {
     return payload;
 }
 
-export function payloadToJsonl(payload) {
+/** Captures all records before asynchronous transport can observe later mutations. */
+export function serializeChatPayload(payload) {
     const normalized = assertPayloadArray(payload);
-    let result = '';
+    const records = [];
 
     for (let index = 0; index < normalized.length; index += 1) {
         const entry = normalized[index];
@@ -63,13 +64,14 @@ export function payloadToJsonl(payload) {
             throw new Error(`Chat payload entry at index ${index} must be an object`);
         }
 
-        if (index > 0) {
-            result += '\n';
-        }
-        result += JSON.stringify(entry);
+        records.push(JSON.stringify(entry));
     }
 
-    return result;
+    return records;
+}
+
+export function payloadToJsonl(payload) {
+    return serializeChatPayload(payload).join('\n');
 }
 
 export function jsonlToPayload(text) {
@@ -104,17 +106,46 @@ export function jsonlToPayload(text) {
     return payload;
 }
 
-export async function jsonlStreamToPayload(stream) {
+export async function visitJsonlStream(stream, visit) {
     if (!stream || typeof stream.getReader !== 'function') {
         throw new Error('JSONL stream must be a ReadableStream');
+    }
+    if (typeof visit !== 'function') {
+        throw new Error('JSONL visitor must be a function');
     }
 
     const reader = stream.getReader();
     const decoder = new TextDecoder();
-    const payload = [];
-    let carry = '';
+    const lineFragments = [];
     let lineNumber = 0;
     let isFirstPayloadLine = true;
+
+    function visitLine(rawLine) {
+        lineNumber += 1;
+        const parsed = parseJsonlLine(rawLine, { isFirstPayloadLine, lineNumber });
+        if (parsed !== undefined) {
+            visit(parsed);
+            isFirstPayloadLine = false;
+        }
+    }
+
+    function consumeText(text) {
+        let start = 0;
+        while (true) {
+            const newlineIndex = text.indexOf('\n', start);
+            if (newlineIndex === -1) {
+                if (start < text.length) {
+                    lineFragments.push(text.slice(start));
+                }
+                return;
+            }
+
+            lineFragments.push(text.slice(start, newlineIndex));
+            visitLine(lineFragments.join(''));
+            lineFragments.length = 0;
+            start = newlineIndex + 1;
+        }
+    }
 
     try {
         while (true) {
@@ -123,24 +154,12 @@ export async function jsonlStreamToPayload(stream) {
                 break;
             }
 
-            carry += decoder.decode(value, { stream: true });
+            consumeText(decoder.decode(value, { stream: true }));
+        }
 
-            while (true) {
-                const newlineIndex = carry.indexOf('\n');
-                if (newlineIndex === -1) {
-                    break;
-                }
-
-                const rawLine = carry.slice(0, newlineIndex);
-                carry = carry.slice(newlineIndex + 1);
-
-                lineNumber += 1;
-                const parsed = parseJsonlLine(rawLine, { isFirstPayloadLine, lineNumber });
-                if (parsed !== undefined) {
-                    payload.push(parsed);
-                    isFirstPayloadLine = false;
-                }
-            }
+        consumeText(decoder.decode());
+        if (lineFragments.length > 0) {
+            visitLine(lineFragments.join(''));
         }
     } catch (error) {
         try {
@@ -152,20 +171,20 @@ export async function jsonlStreamToPayload(stream) {
     } finally {
         reader.releaseLock();
     }
+}
 
-    carry += decoder.decode();
-    if (carry) {
-        lineNumber += 1;
-        const parsed = parseJsonlLine(carry, { isFirstPayloadLine, lineNumber });
-        if (parsed !== undefined) {
-            payload.push(parsed);
-        }
-    }
+export async function jsonlStreamToPayload(stream) {
+    const payload = [];
+    await visitJsonlStream(stream, (entry) => payload.push(entry));
 
     return payload;
 }
 
 function concatChunks(chunks, totalLength) {
+    if (chunks.length === 1) {
+        return chunks[0];
+    }
+
     const output = new Uint8Array(totalLength);
     let offset = 0;
 
@@ -177,22 +196,32 @@ function concatChunks(chunks, totalLength) {
     return output;
 }
 
-export function* payloadToJsonlByteChunks(payload, { maxChunkBytes = 4 * 1024 * 1024 } = {}) {
-    const normalized = assertPayloadArray(payload);
+export function* jsonlRecordsToByteChunks(records, { maxChunkBytes = 4 * 1024 * 1024 } = {}) {
+    if (!Number.isSafeInteger(maxChunkBytes) || maxChunkBytes <= 0) {
+        throw new Error('maxChunkBytes must be a positive safe integer');
+    }
+
     const chunks = [];
     let totalLength = 0;
     let isFirstLine = true;
 
-    for (let index = 0; index < normalized.length; index += 1) {
-        const entry = normalized[index];
-        if (!entry || typeof entry !== 'object') {
-            throw new Error(`Chat payload entry at index ${index} must be an object`);
-        }
-
-        const line = JSON.stringify(entry);
+    for (const line of records) {
         const text = isFirstLine ? line : `\n${line}`;
         isFirstLine = false;
         const bytes = textEncoder.encode(text);
+
+        if (bytes.byteLength > maxChunkBytes) {
+            if (totalLength > 0) {
+                yield concatChunks(chunks, totalLength);
+                chunks.length = 0;
+                totalLength = 0;
+            }
+
+            for (let offset = 0; offset < bytes.byteLength; offset += maxChunkBytes) {
+                yield bytes.subarray(offset, offset + maxChunkBytes);
+            }
+            continue;
+        }
 
         if (totalLength > 0 && totalLength + bytes.byteLength > maxChunkBytes) {
             yield concatChunks(chunks, totalLength);

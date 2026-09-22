@@ -1,0 +1,497 @@
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufWriter, Seek, Write};
+use std::path::Path;
+use zip::write::SimpleFileOptions as FileOptions;
+use zip::{CompressionMethod, ZipWriter};
+
+use crate::zipkit::export_file_options;
+use tt_domain::errors::DomainError;
+use tt_domain::json_merge::merge_json_value;
+use tt_domain::models::persona::{Personas, insert_personas};
+use tt_domain::models::settings::UserSettings;
+
+type ReadPersonas = fn(&Path) -> Result<Personas, DomainError>;
+
+use super::DataArchiveExportResult;
+use super::shared::{
+    ByteProgress, COPY_BUFFER_BYTES, FILE_IO_BUFFER_BYTES, copy_stream_with_cancel,
+    ensure_not_cancelled, internal_error, normalize_archive_entry_path, path_components,
+    read_directory_sorted,
+};
+
+pub(crate) fn run_export_data_archive(
+    data_root: &Path,
+    output_path: &Path,
+    report_progress: &mut dyn FnMut(&str, f32, &str),
+    is_cancelled: &dyn Fn() -> bool,
+    read_personas: ReadPersonas,
+) -> Result<DataArchiveExportResult, DomainError> {
+    run_export_archive(
+        data_root,
+        output_path,
+        "data",
+        &|relative_path| !is_transient_chat_entry(relative_path),
+        report_progress,
+        is_cancelled,
+        read_personas,
+    )
+}
+
+pub(crate) fn run_export_user_backup_archive(
+    user_root: &Path,
+    output_path: &Path,
+    include_secrets: bool,
+    report_progress: &mut dyn FnMut(&str, f32, &str),
+    is_cancelled: &dyn Fn() -> bool,
+    read_personas: ReadPersonas,
+) -> Result<DataArchiveExportResult, DomainError> {
+    run_export_archive(
+        user_root,
+        output_path,
+        "",
+        &|relative_path| should_include_user_backup_entry(relative_path, include_secrets),
+        report_progress,
+        is_cancelled,
+        read_personas,
+    )
+}
+
+fn run_export_archive(
+    source_root: &Path,
+    output_path: &Path,
+    archive_root_prefix: &str,
+    include_entry: &dyn Fn(&Path) -> bool,
+    report_progress: &mut dyn FnMut(&str, f32, &str),
+    is_cancelled: &dyn Fn() -> bool,
+    read_personas: ReadPersonas,
+) -> Result<DataArchiveExportResult, DomainError> {
+    report_progress("preparing", 0.0, "Preparing export");
+    ensure_not_cancelled(is_cancelled)?;
+
+    if !source_root.is_dir() {
+        return Err(DomainError::NotFound(format!(
+            "Export source directory not found: {}",
+            source_root.display()
+        )));
+    }
+
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| internal_error("Failed to create export output directory", error))?;
+    }
+
+    let normalized_archive_root_prefix = archive_root_prefix.trim_matches('/');
+    let total_bytes = total_export_bytes(source_root, source_root, include_entry, is_cancelled)?;
+    let mut progress = ByteProgress::new(total_bytes, 3.0, 96.0);
+    report_progress("zipping", 3.0, "Writing archive data");
+
+    let dir_options = FileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .unix_permissions(0o755);
+
+    let output_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)
+        .map_err(|error| internal_error("Failed to create export archive file", error))?;
+    let buffered_output = BufWriter::with_capacity(FILE_IO_BUFFER_BYTES, output_file);
+    let mut writer = ZipWriter::new(buffered_output);
+
+    if !normalized_archive_root_prefix.is_empty() {
+        writer
+            .add_directory(format!("{}/", normalized_archive_root_prefix), dir_options)
+            .map_err(|error| internal_error("Failed to add archive root directory", error))?;
+    }
+
+    let mut copy_buffer = vec![0u8; COPY_BUFFER_BYTES];
+    write_export_entries(
+        &mut writer,
+        source_root,
+        source_root,
+        normalized_archive_root_prefix,
+        include_entry,
+        dir_options,
+        &mut progress,
+        &mut copy_buffer,
+        report_progress,
+        is_cancelled,
+        read_personas,
+    )?;
+    progress.complete("zipping", "Archive data written", report_progress);
+
+    let mut buffered_output = writer
+        .finish()
+        .map_err(|error| internal_error("Failed to finalize export archive", error))?;
+    buffered_output
+        .flush()
+        .map_err(|error| internal_error("Failed to flush export archive", error))?;
+
+    ensure_not_cancelled(is_cancelled)?;
+    report_progress("finalizing", 100.0, "Export completed");
+
+    Ok(DataArchiveExportResult {
+        archive_path: output_path.to_path_buf(),
+    })
+}
+
+fn total_export_bytes(
+    root: &Path,
+    current: &Path,
+    include_entry: &dyn Fn(&Path) -> bool,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<u64, DomainError> {
+    let mut total_bytes = 0u64;
+
+    for entry in read_directory_sorted(current)? {
+        ensure_not_cancelled(is_cancelled)?;
+
+        let file_type = entry
+            .file_type()
+            .map_err(|error| internal_error("Failed to read export entry type", error))?;
+        let path = entry.path();
+        let relative_path = path
+            .strip_prefix(root)
+            .map_err(|error| internal_error("Failed to resolve export relative path", error))?;
+        if !include_entry(relative_path) {
+            continue;
+        }
+
+        if file_type.is_dir() {
+            total_bytes = total_bytes.saturating_add(total_export_bytes(
+                root,
+                &path,
+                include_entry,
+                is_cancelled,
+            )?);
+            continue;
+        }
+
+        if file_type.is_file() {
+            let file_size = entry
+                .metadata()
+                .map_err(|error| internal_error("Failed to read export file metadata", error))?
+                .len();
+            total_bytes = total_bytes.saturating_add(file_size);
+        }
+    }
+
+    Ok(total_bytes)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_export_entries(
+    writer: &mut ZipWriter<impl Write + Seek>,
+    root: &Path,
+    current: &Path,
+    archive_root_prefix: &str,
+    include_entry: &dyn Fn(&Path) -> bool,
+    dir_options: FileOptions,
+    progress: &mut ByteProgress,
+    copy_buffer: &mut [u8],
+    report_progress: &mut dyn FnMut(&str, f32, &str),
+    is_cancelled: &dyn Fn() -> bool,
+    read_personas: ReadPersonas,
+) -> Result<(), DomainError> {
+    for entry in read_directory_sorted(current)? {
+        ensure_not_cancelled(is_cancelled)?;
+
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| internal_error("Failed to read export entry type", error))?;
+        let relative_path = path
+            .strip_prefix(root)
+            .map_err(|error| internal_error("Failed to resolve export relative path", error))?;
+        if !include_entry(relative_path) {
+            continue;
+        }
+
+        let archive_relative_path = normalize_archive_entry_path(relative_path);
+        let entry_path = archive_entry_path(archive_root_prefix, &archive_relative_path);
+
+        if file_type.is_dir() {
+            writer
+                .add_directory(format!("{}/", entry_path), dir_options)
+                .map_err(|error| internal_error("Failed to add directory to archive", error))?;
+
+            write_export_entries(
+                writer,
+                root,
+                &path,
+                archive_root_prefix,
+                include_entry,
+                dir_options,
+                progress,
+                copy_buffer,
+                report_progress,
+                is_cancelled,
+                read_personas,
+            )?;
+            continue;
+        }
+
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let file_options = export_file_options(&path);
+        writer
+            .start_file(&entry_path, file_options)
+            .map_err(|error| internal_error("Failed to add file to archive", error))?;
+
+        if matches!(
+            archive_relative_path.as_str(),
+            "settings.json" | "default-user/settings.json"
+        ) {
+            let source_bytes = write_export_settings(writer, &path, read_personas)?;
+            progress.advance(
+                source_bytes,
+                "zipping",
+                "Writing archive data",
+                report_progress,
+            );
+            continue;
+        }
+
+        let mut source_file = File::open(&path)
+            .map_err(|error| internal_error("Failed to open export source file", error))?;
+        let mut on_bytes_copied = |bytes| {
+            progress.advance(bytes, "zipping", "Writing archive data", report_progress);
+        };
+        copy_stream_with_cancel(
+            &mut source_file,
+            writer,
+            copy_buffer,
+            is_cancelled,
+            &mut on_bytes_copied,
+            "Failed to read export source file",
+            "Failed to write file to archive",
+        )?;
+    }
+
+    Ok(())
+}
+
+fn write_export_settings(
+    writer: &mut impl Write,
+    path: &Path,
+    read_personas: ReadPersonas,
+) -> Result<u64, DomainError> {
+    let user_root = path.parent().expect("settings file parent");
+    let mut settings = serde_json::json!({});
+    let mut source_bytes = 0;
+    for name in [
+        "settings.json",
+        "settings/appearance.json",
+        "settings/presets.json",
+        "settings/layout.json",
+        "settings/persona-state.json",
+    ] {
+        let section_path = user_root.join(name);
+        let bytes = match fs::read(&section_path) {
+            Ok(bytes) => bytes,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && name != "settings.json" =>
+            {
+                continue;
+            }
+            Err(error) => {
+                return Err(internal_error(
+                    &format!("Failed to read {}", section_path.display()),
+                    error,
+                ));
+            }
+        };
+        // Progress uses scanned source sizes; the section files are also archived.
+        if name == "settings.json" {
+            source_bytes = bytes.len() as u64;
+        }
+        let section: UserSettings = serde_json::from_slice(&bytes).map_err(|error| {
+            DomainError::InvalidData(format!(
+                "Invalid settings {}: {error}",
+                section_path.display()
+            ))
+        })?;
+        merge_json_value(&mut settings, section.data);
+    }
+    insert_personas(&mut settings, &read_personas(user_root)?);
+    serde_json::to_writer_pretty(writer, &settings)
+        .map_err(|error| internal_error("Failed to write settings to archive", error))?;
+    Ok(source_bytes)
+}
+
+fn archive_entry_path(archive_root_prefix: &str, archive_relative_path: &str) -> String {
+    if archive_root_prefix.is_empty() {
+        return archive_relative_path.to_string();
+    }
+
+    format!("{}/{}", archive_root_prefix, archive_relative_path)
+}
+
+fn should_include_user_backup_entry(relative_path: &Path, include_secrets: bool) -> bool {
+    if is_transient_chat_entry(relative_path) {
+        return false;
+    }
+
+    if include_secrets {
+        return true;
+    }
+
+    let components = path_components(relative_path);
+    match components.as_slice() {
+        [file_name] => file_name != "secrets.json",
+        [directory, file_name] if directory == "backups" => {
+            !(file_name.starts_with("secrets_migration_") && file_name.ends_with(".json"))
+        }
+        _ => true,
+    }
+}
+
+fn is_chat_backup_staging_entry(relative_path: &Path) -> bool {
+    const PREFIX: &str = ".tmp-chat-backup-";
+
+    let components = path_components(relative_path);
+    components.windows(2).any(|pair| {
+        let [directory, file_name] = pair else {
+            return false;
+        };
+        let Some(identifier) = file_name.strip_prefix(PREFIX) else {
+            return false;
+        };
+        directory == "backups"
+            && identifier.len() == 32
+            && uuid::Uuid::parse_str(identifier).is_ok()
+    })
+}
+
+fn is_chat_commit_staging_entry(relative_path: &Path) -> bool {
+    let components = path_components(relative_path);
+    matches!(
+        components.as_slice(),
+        [default_user, staging, chat_commits, ..]
+            if default_user == "default-user"
+                && staging == ".staging"
+                && chat_commits == "chat-commits"
+    ) || matches!(
+        components.as_slice(),
+        [staging, chat_commits, ..]
+            if staging == ".staging" && chat_commits == "chat-commits"
+    )
+}
+
+fn is_transient_chat_entry(relative_path: &Path) -> bool {
+    is_chat_backup_staging_entry(relative_path) || is_chat_commit_staging_entry(relative_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
+    fn temp_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "tauritavern-data-archive-export-{}-{}",
+            name,
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+
+    #[test]
+    fn user_backup_filter_excludes_secret_files_when_secret_export_is_disabled() {
+        assert!(!should_include_user_backup_entry(
+            Path::new("secrets.json"),
+            false
+        ));
+        assert!(!should_include_user_backup_entry(
+            Path::new("backups/secrets_migration_123.json"),
+            false
+        ));
+    }
+
+    #[test]
+    fn user_backup_filter_keeps_secret_files_when_secret_export_is_enabled() {
+        assert!(should_include_user_backup_entry(
+            Path::new("secrets.json"),
+            true
+        ));
+        assert!(should_include_user_backup_entry(
+            Path::new("backups/secrets_migration_123.json"),
+            true
+        ));
+    }
+
+    #[test]
+    fn archive_filters_chat_backup_staging_files_in_full_and_user_paths() {
+        let staging = format!(".tmp-chat-backup-{}", uuid::Uuid::nil().simple());
+
+        assert!(is_chat_backup_staging_entry(Path::new(&format!(
+            "default-user/backups/{staging}"
+        ))));
+        assert!(!should_include_user_backup_entry(
+            Path::new(&format!("backups/{staging}")),
+            true
+        ));
+        assert!(!is_chat_backup_staging_entry(Path::new(
+            "default-user/backups/.tmp-chat-backup-not-a-uuid"
+        )));
+    }
+
+    #[test]
+    fn export_refuses_to_overwrite_existing_archive() {
+        let root = temp_root("existing-output");
+        let source_root = root.join("source");
+        let output_path = root.join("export.zip");
+        fs::create_dir_all(&source_root).expect("create source root");
+        fs::write(source_root.join("settings.json"), b"{}").expect("write source file");
+        fs::write(&output_path, b"keep me").expect("write existing output");
+
+        let mut report_progress = |_stage: &str, _progress_percent: f32, _message: &str| {};
+        let result = run_export_data_archive(
+            &source_root,
+            &output_path,
+            &mut report_progress,
+            &|| false,
+            |_| Ok(Personas::new()),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read(&output_path).expect("read existing output"),
+            b"keep me"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn export_progress_is_weighted_by_file_bytes() {
+        let root = temp_root("byte-progress");
+        let source_root = root.join("source");
+        let output_path = root.join("export.zip");
+        fs::create_dir_all(&source_root).expect("create source root");
+        fs::write(source_root.join("a.json"), b"a").expect("write small source file");
+        fs::write(source_root.join("b.json"), vec![b'b'; 99]).expect("write large source file");
+
+        let mut reports = Vec::new();
+        let mut report_progress = |stage: &str, percent: f32, _message: &str| {
+            if stage == "zipping" {
+                reports.push(percent);
+            }
+        };
+        run_export_data_archive(
+            &source_root,
+            &output_path,
+            &mut report_progress,
+            &|| false,
+            |_| Ok(Personas::new()),
+        )
+        .expect("export archive");
+
+        assert!(reports.iter().any(|percent| (3.8..4.1).contains(percent)));
+        assert_eq!(reports.last().copied(), Some(96.0));
+
+        fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+}

@@ -15,13 +15,15 @@ import {
     is_send_press,
     neutralCharacterName,
     newAssistantChat,
-    openCharacterChat,
     printCharactersDebounced,
     renameGroupOrCharacterChat,
+    replaceChatContents,
+    resetChatSurfaceView,
     saveSettingsDebounced,
     selectCharacterById,
     setActiveCharacter,
     setActiveGroup,
+    setChatScrollTop,
     system_avatar,
     system_message_types,
     this_chid,
@@ -30,7 +32,7 @@ import {
 } from '../script.js';
 import { getRegexedString, regex_placement } from './extensions/regex/engine.js';
 import { ChatInputFocusIntent, focusChatInput } from './chat-input-focus.js';
-import { deleteGroupChatByName, getGroupAvatar, groups, is_group_generating, openGroupById, openGroupChat } from './group-chats.js';
+import { deleteGroupChatByName, getGroupAvatar, groups, is_group_generating, openGroupById, selected_group } from './group-chats.js';
 import { t } from './i18n.js';
 import { callGenericPopup, POPUP_TYPE } from './popup.js';
 import { getMessageTimeStamp } from './RossAscends-mods.js';
@@ -243,8 +245,8 @@ export async function openWelcomeScreen({ force = false, expand = false } = {}) 
 
     if (chatAfterFetch === undefined && force) {
         console.debug('Forcing welcome screen open.');
-        chat.splice(0, chat.length);
-        $('#chat').empty();
+        replaceChatContents([]);
+        resetChatSurfaceView({ includeAuxiliary: true });
     }
 
     await sendWelcomePanel(recentChats, expand);
@@ -497,15 +499,12 @@ async function openRecentCharacterChat(avatarId, fileName) {
     }
 
     try {
-        await selectCharacterById(characterId);
-        setActiveCharacter(avatarId);
-        saveSettingsDebounced();
-        const currentChatId = getCurrentChatId();
-        if (currentChatId === fileName) {
-            console.debug(`Chat ${fileName} is already open.`);
+        await selectCharacterById(characterId, { chatFile: fileName });
+        if (selected_group || String(this_chid) !== String(characterId) || getCurrentChatId() !== fileName) {
             return;
         }
-        await openCharacterChat(fileName);
+        setActiveCharacter(avatarId);
+        saveSettingsDebounced();
     } catch (error) {
         console.error('Error opening recent chat:', error);
         toastr.error(t`Failed to open recent chat. See console for details.`);
@@ -525,15 +524,12 @@ async function openRecentGroupChat(groupId, fileName) {
     }
 
     try {
-        await openGroupById(groupId);
-        setActiveGroup(groupId);
-        saveSettingsDebounced();
-        const currentChatId = getCurrentChatId();
-        if (currentChatId === fileName) {
-            console.debug(`Chat ${fileName} is already open.`);
+        await openGroupById(groupId, { chatId: fileName });
+        if (selected_group !== groupId || getCurrentChatId() !== fileName) {
             return;
         }
-        await openGroupChat(groupId, fileName);
+        setActiveGroup(groupId);
+        saveSettingsDebounced();
     } catch (error) {
         console.error('Error opening recent group chat:', error);
         toastr.error(t`Failed to open recent group chat. See console for details.`);
@@ -694,13 +690,13 @@ async function refreshWelcomeScreen({ flashChat = null } = {}) {
         });
         if (chatToFlash instanceof HTMLElement) {
             if (!isElementInViewport(chatToFlash)) {
-                chatElement.scrollTop = chatToFlash.offsetTop - chatElement.offsetTop - (chatToFlash.clientHeight / 2);
+                setChatScrollTop(chatToFlash.offsetTop - chatElement.offsetTop - (chatToFlash.clientHeight / 2));
             }
             flashHighlight($(chatToFlash), 1000);
         }
     } else {
         // Restore scroll position
-        chatElement.scrollTop = scrollTop + (chatElement.scrollHeight - scrollHeight);
+        setChatScrollTop(scrollTop + (chatElement.scrollHeight - scrollHeight));
     }
 }
 

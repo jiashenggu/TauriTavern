@@ -1,12 +1,9 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import { jsonResponse, textResponse } from '../src/tauri/main/http-utils.js';
 import { createRouteRegistry } from '../src/tauri/main/router.js';
 import { registerResourceRoutes } from '../src/tauri/main/routes/resource-routes.js';
-
-const backgroundsSource = await readFile(new URL('../src/scripts/backgrounds.js', import.meta.url), 'utf8');
 
 function createResourceRouter(context) {
     const router = createRouteRegistry();
@@ -129,9 +126,6 @@ test('/api/backgrounds/upload leaves filename sanitization to Rust storage bound
             });
             return 'CON';
         },
-        invalidateInvokeAll(scope) {
-            calls.push({ command: 'invalidateInvokeAll', scope });
-        },
     });
 
     const body = new FormData();
@@ -158,18 +152,5 @@ test('/api/backgrounds/upload leaves filename sanitization to Rust storage bound
             command: 'upload_background_from_path',
             args: { filename: 'CON ', file_path: '/tmp/staged-background' },
         },
-        { command: 'invalidateInvokeAll', scope: 'read_thumbnail_asset' },
     ]);
-});
-
-test('background folder tile cover failures are reported at tile scope', () => {
-    assert.match(backgroundsSource, /getFolderCoverUrl\(folder\)\.then\(coverUrl =>/);
-    assert.match(backgroundsSource, /\.catch\(error => \{\s*console\.warn\(`Failed to load background folder cover/);
-});
-
-test('background folder payload is validated before mutating UI state', () => {
-    assert.match(backgroundsSource, /function assertBackgroundFoldersPayload\(data\)/);
-    assert.match(backgroundsSource, /folders must be an array/);
-    assert.match(backgroundsSource, /imageFolderMap values must be string arrays/);
-    assert.match(backgroundsSource, /assertBackgroundFoldersPayload\(data\);\s*folderList = data\.folders;/);
 });

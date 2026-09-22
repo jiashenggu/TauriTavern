@@ -1,11 +1,12 @@
 // @ts-check
 
 /**
- * A tiny global parking lot that keeps iframe browsing contexts alive by
+ * A tiny global parking lot that keeps iframe elements attached for reuse by
  * moving them into a hidden DOM container instead of destroying them.
+ * Browsing-context preservation across DOM moves is platform-dependent.
  *
- * This is a Phase-1 mechanism:
- * - Keeps scroll-driven runtimes smooth (no reload when coming back).
+ * The parking lot:
+ * - Reuses iframe elements when scrolling back.
  * - Enforces a hard cap (mobile) by evicting oldest parked iframes.
  * - Uses TTL to avoid leaking parked instances after DOM rebuilds.
  */
@@ -63,8 +64,7 @@ function evictIfNeeded(maxIframes, ttlMs) {
             if (now - entry.parkedAt <= ttlMs) {
                 continue;
             }
-            entry.iframe.remove();
-            parkedById.delete(id);
+            dropParkedManagedIframe(id);
         }
     }
 
@@ -76,9 +76,8 @@ function evictIfNeeded(maxIframes, ttlMs) {
         .sort((a, b) => a[1].parkedAt - b[1].parkedAt)
         .slice(0, parkedById.size - maxIframes);
 
-    for (const [id, entry] of victims) {
-        entry.iframe.remove();
-        parkedById.delete(id);
+    for (const [id] of victims) {
+        dropParkedManagedIframe(id);
     }
 }
 
@@ -101,7 +100,7 @@ export function parkManagedIframe({ id, iframe, maxIframes, ttlMs }) {
 
     const existing = parkedById.get(id);
     if (existing && existing.iframe !== iframe) {
-        existing.iframe.remove();
+        dropParkedManagedIframe(id);
     }
 
     requireLot().append(iframe);
@@ -126,6 +125,11 @@ export function takeParkedManagedIframe(id) {
     return entry.iframe;
 }
 
+/** @param {string} id @param {HTMLIFrameElement} iframe */
+export function isManagedIframeParked(id, iframe) {
+    return parkedById.get(id)?.iframe === iframe && Boolean(lot?.contains(iframe));
+}
+
 /**
  * Drops a parked iframe (hard-evict).
  * @param {string} id
@@ -135,7 +139,8 @@ export function dropParkedManagedIframe(id) {
     if (!entry) {
         return;
     }
-    entry.iframe.remove();
+    // An upstream renderer may already have moved the element out of the lot.
+    if (lot?.contains(entry.iframe)) entry.iframe.remove();
     parkedById.delete(id);
 }
 

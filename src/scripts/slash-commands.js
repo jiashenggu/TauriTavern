@@ -28,6 +28,7 @@ import {
     getOneCharacter,
     getRequestHeaders,
     getThumbnailUrl,
+    refreshCharacterAvatarImages,
     isConnectionValidationSuspended,
     is_send_press,
     main_api,
@@ -37,6 +38,7 @@ import {
     newAssistantChat,
     online_status,
     reloadCurrentChat,
+    refreshActiveSwipeButtons,
     removeMacros,
     renameCharacter,
     renameChat,
@@ -53,24 +55,30 @@ import {
     setCharacterName,
     setExtensionPrompt,
     showMoreMessages,
+    getChatScrollTop,
+    setChatScrollTop,
+    scrollChatSurfaceTo,
     swipe,
     stopGeneration,
     substituteParams,
-    syncMesToSwipe,
     system_avatar,
     system_message_types,
     this_chid,
-    updateMessageElement,
+    updateSwipeCounter,
+    rerenderChatMessage,
+    isBoundedChatSurfaceView,
+    jumpBoundedChatSurfaceToMessage,
+    withChatSurfaceStructureMutation,
 } from '../script.js';
 import { extension_prompt_roles, extension_prompt_types } from './extension-prompts.js';
 import { SlashCommandParser } from './slash-commands/SlashCommandParser.js';
 import { SlashCommandParserError } from './slash-commands/SlashCommandParserError.js';
 import { getMessageTimeStamp, isMobile } from './RossAscends-mods.js';
-import { hideChatMessageRange, hideChatMessageScope } from './chats.js';
+import { hideChatMessageRange } from './chats.js';
 import { getContext, saveMetadataDebounced } from './extensions.js';
 import { getRegexedString, regex_placement } from './extensions/regex/engine.js';
 import { findGroupMemberId, groups, is_group_generating, openGroupById, regenerateGroup, resetSelectedGroup, saveGroupChat, selected_group, getGroupMembers } from './group-chats.js';
-import { addAndSelectCustomModelForSource, chat_completion_sources, getChatCompletionModelControl, isCustomModelActionValue, MINIMAX_ENDPOINT, oai_settings, promptManager, SILICONFLOW_ENDPOINT, ZAI_ENDPOINT } from './openai.js';
+import { addAndSelectCustomModelForSource, chat_completion_sources, getChatCompletionModelControl, isCustomModelActionValue, MINIMAX_ENDPOINT, MOONSHOT_ENDPOINT, oai_settings, OPENCODE_API_FORMAT, OPENCODE_ENDPOINT, POLLINATIONS_ENDPOINT, promptManager, SILICONFLOW_ENDPOINT, ZAI_ENDPOINT } from './openai.js';
 import { user_avatar } from './personas.js';
 import { addEphemeralStoppingString, chat_styles, context_presets, flushEphemeralStoppingStrings, playMessageSound, power_user } from './power-user.js';
 import { SERVER_INPUTS, textgen_types, textgenerationwebui_settings } from './textgen-settings.js';
@@ -89,6 +97,7 @@ import { SlashCommandNamedArgumentAssignment } from './slash-commands/SlashComma
 import { SlashCommandEnumValue, enumTypes } from './slash-commands/SlashCommandEnumValue.js';
 import { getActiveIosPolicyCapabilities } from './tauritavern/ios-policy.js';
 import { getAgentGenerationOptions } from './tauritavern/agent/agent-generation-router.js';
+import { reviseOutput } from './tauritavern/output-revision.js';
 import { agentErrorMessage } from './tauritavern/agent/agent-error-presenter.js';
 import { POPUP_RESULT, POPUP_TYPE, Popup, callGenericPopup } from './popup.js';
 import { commonEnumProviders, enumIcons, commonEnumMatchProviders } from './slash-commands/SlashCommandCommonEnumsProvider.js';
@@ -184,6 +193,11 @@ function setupConnectAPIMap() {
             source: chat_completion_sources.CUSTOM,
         },
         'custom_claude_messages': {
+            selected: 'openai',
+            button: '#api_button_openai',
+            source: chat_completion_sources.CUSTOM,
+        },
+        'custom_gemini_generate_content': {
             selected: 'openai',
             button: '#api_button_openai',
             source: chat_completion_sources.CUSTOM,
@@ -447,7 +461,12 @@ export function initDefaultSlashCommands() {
         name: 'custom-api-format',
         callback: async function (_args, format) {
             const rawFormat = String(format || '').trim();
+            const isOpenCode = main_api === 'openai'
+                && oai_settings.chat_completion_source === chat_completion_sources.OPENCODE;
             if (!rawFormat) {
+                if (isOpenCode) {
+                    return String(oai_settings.opencode_api_format || OPENCODE_API_FORMAT.OPENAI_COMPAT);
+                }
                 if (main_api !== 'openai' || oai_settings.chat_completion_source !== chat_completion_sources.CUSTOM) {
                     return '';
                 }
@@ -455,7 +474,16 @@ export function initDefaultSlashCommands() {
             }
 
             const normalized = rawFormat.toLowerCase();
-            const allowed = ['openai_compat', 'openai_responses', 'claude_messages', 'gemini_interactions'];
+            if (isOpenCode) {
+                if (!Object.values(OPENCODE_API_FORMAT).includes(normalized)) {
+                    toastr.error(t`Error: ${rawFormat} is not a valid OpenCode API format`);
+                    return '';
+                }
+                $('#opencode_api_format').val(normalized).trigger('input');
+                return normalized;
+            }
+
+            const allowed = ['openai_compat', 'openai_responses', 'claude_messages', 'gemini_interactions', 'gemini_generate_content'];
             if (!allowed.includes(normalized)) {
                 toastr.error(t`Error: ${rawFormat} is not a valid custom API format`);
                 return '';
@@ -473,6 +501,9 @@ export function initDefaultSlashCommands() {
                     break;
                 case 'claude_messages':
                     sourceSelectValue = 'custom_claude_messages';
+                    break;
+                case 'gemini_generate_content':
+                    sourceSelectValue = 'custom_gemini_generate_content';
                     break;
                 case 'gemini_interactions':
                     sourceSelectValue = 'custom_gemini_interactions';
@@ -494,12 +525,13 @@ export function initDefaultSlashCommands() {
                     new SlashCommandEnumValue('openai_responses'),
                     new SlashCommandEnumValue('claude_messages'),
                     new SlashCommandEnumValue('gemini_interactions'),
+                    new SlashCommandEnumValue('gemini_generate_content'),
                 ],
             }),
         ],
         helpString: `
             <div>
-                ${t`Get or set the custom API format (OpenAI-compatible / OpenAI Responses / Claude Messages / Gemini Interactions).`}
+                ${t`Get or set the custom API format (OpenAI-compatible / OpenAI Responses / Claude Messages / Gemini Interactions / Gemini generateContent).`}
             </div>
         `,
     }));
@@ -1522,6 +1554,19 @@ export function initDefaultSlashCommands() {
         helpString: t`Sets the message style to flat chat mode.`,
     }));
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'fix',
+        callback: async (args, value) => {
+            await reviseOutput(value, args._abortController);
+            return '';
+        },
+        unnamedArgumentList: [SlashCommandArgument.fromProps({
+            description: t`Changes to make to the last reply`,
+            typeList: [ARGUMENT_TYPE.STRING],
+            isRequired: true,
+        })],
+        helpString: t`Revises the selected swipe of the last reply. Supports Agent replies and Chat Completion models with tool calling. Example: /fix Make the ending quieter.`,
+    }));
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'continue',
         callback: continueChatCallback,
         aliases: ['cont'],
@@ -1882,17 +1927,13 @@ export function initDefaultSlashCommands() {
         ],
         unnamedArgumentList: [
             SlashCommandArgument.fromProps({
-                description: t`message index (starts with 0) or range, or "all" / "before" (messages before the loaded window), defaults to the last message index if not provided`,
-                typeList: [ARGUMENT_TYPE.NUMBER, ARGUMENT_TYPE.RANGE, ARGUMENT_TYPE.STRING],
+                description: t`message index (starts with 0) or range, defaults to the last message index if not provided`,
+                typeList: [ARGUMENT_TYPE.NUMBER, ARGUMENT_TYPE.RANGE],
                 isRequired: false,
-                enumProvider: (executor, scope) => [
-                    new SlashCommandEnumValue('all', t`every message in the chat, including unloaded ones`),
-                    new SlashCommandEnumValue('before', t`only unloaded messages before the current window`),
-                    ...commonEnumProviders.messages()(executor, scope),
-                ],
+                enumProvider: commonEnumProviders.messages(),
             }),
         ],
-        helpString: t`Hides a chat message from the prompt. Use <code>all</code> to hide the entire chat, or <code>before</code> to hide only the messages stored before the loaded window.`,
+        helpString: t`Hides a chat message from the prompt.`,
     }));
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'unhide',
@@ -1909,17 +1950,13 @@ export function initDefaultSlashCommands() {
         ],
         unnamedArgumentList: [
             SlashCommandArgument.fromProps({
-                description: t`message index (starts with 0) or range, or "all" / "before" (messages before the loaded window), defaults to the last message index if not provided`,
-                typeList: [ARGUMENT_TYPE.NUMBER, ARGUMENT_TYPE.RANGE, ARGUMENT_TYPE.STRING],
+                description: t`message index (starts with 0) or range, defaults to the last message index if not provided`,
+                typeList: [ARGUMENT_TYPE.NUMBER, ARGUMENT_TYPE.RANGE],
                 isRequired: false,
-                enumProvider: (executor, scope) => [
-                    new SlashCommandEnumValue('all', t`every message in the chat, including unloaded ones`),
-                    new SlashCommandEnumValue('before', t`only unloaded messages before the current window`),
-                    ...commonEnumProviders.messages()(executor, scope),
-                ],
+                enumProvider: commonEnumProviders.messages(),
             }),
         ],
-        helpString: t`Unhides a message from the prompt. Use <code>all</code> to unhide the entire chat, or <code>before</code> to unhide only the messages stored before the loaded window.`,
+        helpString: t`Unhides a message from the prompt.`,
     }));
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'member-get',
@@ -3161,10 +3198,13 @@ export function initDefaultSlashCommands() {
                 typeList: [ARGUMENT_TYPE.STRING],
                 enumList: [
                     new SlashCommandEnumValue('custom', 'custom OpenAI-compatible', enumTypes.getBasedOnIndex(UNIQUE_APIS.findIndex(x => x === 'openai')), 'O'),
+                    new SlashCommandEnumValue('opencode', 'OpenCode', enumTypes.getBasedOnIndex(UNIQUE_APIS.findIndex(x => x === 'openai')), 'O'),
                     new SlashCommandEnumValue('zai', 'Z.AI', enumTypes.getBasedOnIndex(UNIQUE_APIS.findIndex(x => x === 'zai')), 'Z'),
                     new SlashCommandEnumValue('vertexai', 'Google Vertex AI', enumTypes.getBasedOnIndex(UNIQUE_APIS.findIndex(x => x === 'vertexai')), 'V'),
                     new SlashCommandEnumValue('siliconflow', 'SiliconFlow', enumTypes.getBasedOnIndex(UNIQUE_APIS.findIndex(x => x === 'siliconflow')), 'S'),
                     new SlashCommandEnumValue('minimax', 'MiniMax', enumTypes.getBasedOnIndex(UNIQUE_APIS.findIndex(x => x === 'minimax')), 'M'),
+                    new SlashCommandEnumValue('moonshot', 'Moonshot AI', enumTypes.getBasedOnIndex(UNIQUE_APIS.findIndex(x => x === 'moonshot')), 'M'),
+                    new SlashCommandEnumValue('pollinations', 'Pollinations', enumTypes.getBasedOnIndex(UNIQUE_APIS.findIndex(x => x === 'pollinations')), 'P'),
                     new SlashCommandEnumValue('kobold', 'KoboldAI Classic', enumTypes.getBasedOnIndex(UNIQUE_APIS.findIndex(x => x === 'kobold')), 'K'),
                     ...Object.values(textgen_types).map(api => new SlashCommandEnumValue(api, null, enumTypes.getBasedOnIndex(UNIQUE_APIS.findIndex(x => x === 'textgenerationwebui')), 'T')),
                 ],
@@ -3305,9 +3345,12 @@ export function initDefaultSlashCommands() {
         name: 'chat-render',
         helpString: t`Renders a specified number of messages into the chat window. Displays all messages if no argument is provided.`,
         callback: async (args, number) => {
+            if (isBoundedChatSurfaceView()) {
+                throw new Error(t`/chat-render is unavailable while chat virtualization is enabled. Use /chat-jump to navigate to a message.`);
+            }
             await showMoreMessages(number && !isNaN(Number(number)) ? Number(number) : Number.MAX_SAFE_INTEGER);
             if (isTrueBoolean(String(args?.scroll ?? ''))) {
-                $('#chat').scrollTop(0);
+                setChatScrollTop(0);
             }
             return '';
         },
@@ -3492,6 +3535,12 @@ export function initDefaultSlashCommands() {
                 return '';
             }
 
+            if (isBoundedChatSurfaceView()) {
+                const messageElement = jumpBoundedChatSurfaceToMessage(messageIndex);
+                flashHighlight($(messageElement), 2000);
+                return '';
+            }
+
             // Load more messages if needed
             const firstDisplayedMessageId = getFirstDisplayedMessageId();
             if (isFinite(firstDisplayedMessageId) && messageIndex < firstDisplayedMessageId) {
@@ -3507,8 +3556,8 @@ export function initDefaultSlashCommands() {
                 const elementRect = messageElement.getBoundingClientRect();
                 const containerRect = chatContainer.getBoundingClientRect();
 
-                const scrollPosition = elementRect.top - containerRect.top + chatContainer.scrollTop;
-                chatContainer.scrollTo({
+                const scrollPosition = elementRect.top - containerRect.top + getChatScrollTop();
+                scrollChatSurfaceTo({
                     top: scrollPosition,
                     behavior: 'smooth',
                 });
@@ -4694,6 +4743,7 @@ async function echoCallback(args, value) {
  * @param {string} value - The swipe text to add (unnamed argument)
  */
 async function addSwipeCallback(args, value) {
+    const lastMessageId = chat.length - 1;
     const lastMessage = chat[chat.length - 1];
 
     if (!lastMessage) {
@@ -4741,15 +4791,13 @@ async function addSwipeCallback(args, value) {
     const newSwipeId = lastMessage.swipes.length - 1;
 
     if (isTrueBoolean(args.switch)) {
-        // Make sure ad-hoc changes to extras are saved before swiping away
-        syncMesToSwipe();
-        lastMessage.swipe_id = newSwipeId;
-        lastMessage.mes = lastMessage.swipes[newSwipeId];
-        lastMessage.extra = structuredClone(lastMessage.swipe_info?.[newSwipeId]?.extra ?? lastMessage.extra ?? {});
+        await swipe(null, SWIPE_DIRECTION.RIGHT, { source: SWIPE_SOURCE.SLASH_COMMAND, repeated: false, forceMesId: lastMessageId, forceSwipeId: newSwipeId });
+    } else {
+        await updateSwipeCounter(lastMessageId, { message: lastMessage });
+        refreshActiveSwipeButtons([lastMessageId]);
     }
 
     await saveChatConditional();
-    await reloadCurrentChat();
 
     return String(newSwipeId);
 }
@@ -4758,7 +4806,7 @@ async function deleteSwipeCallback(_, arg) {
     // Take the provided argument. Null if none provided, which will target the current swipe.
     const swipeId = arg && !isNaN(Number(arg)) ? (Number(arg) - 1) : null;
 
-    const newSwipeId = await deleteSwipe(swipeId);
+    const newSwipeId = await deleteSwipe(swipeId, chat.length - 1);
 
     return String(newSwipeId);
 }
@@ -4849,20 +4897,7 @@ async function askCharacter(args, text) {
     return await slashCommandReturnHelper.doReturn(args.return ?? 'pipe', message, { objectToStringFunc: x => x.mes });
 }
 
-function parseHideScopeKeyword(value) {
-    const keyword = String(value ?? '').trim().toLowerCase();
-    return keyword === 'all' || keyword === 'before' ? keyword : null;
-}
-
 async function hideMessageCallback(args, value) {
-    const nameFilter = String(args.name ?? '').trim();
-
-    const scope = parseHideScopeKeyword(value);
-    if (scope) {
-        await hideChatMessageScope(scope, false, nameFilter);
-        return '';
-    }
-
     const range = value ? stringToRange(value, 0, chat.length - 1) : { start: chat.length - 1, end: chat.length - 1 };
 
     if (!range) {
@@ -4870,19 +4905,12 @@ async function hideMessageCallback(args, value) {
         return '';
     }
 
+    const nameFilter = String(args.name ?? '').trim();
     await hideChatMessageRange(range.start, range.end, false, nameFilter);
     return '';
 }
 
 async function unhideMessageCallback(args, value) {
-    const nameFilter = String(args.name ?? '').trim();
-
-    const scope = parseHideScopeKeyword(value);
-    if (scope) {
-        await hideChatMessageScope(scope, true, nameFilter);
-        return '';
-    }
-
     const range = value ? stringToRange(value, 0, chat.length - 1) : { start: chat.length - 1, end: chat.length - 1 };
 
     if (!range) {
@@ -4890,6 +4918,7 @@ async function unhideMessageCallback(args, value) {
         return '';
     }
 
+    const nameFilter = String(args.name ?? '').trim();
     await hideChatMessageRange(range.start, range.end, true, nameFilter);
     return '';
 }
@@ -5204,16 +5233,17 @@ async function deleteMessagesByNameCallback(_, name) {
         return;
     }
 
-    for (const message of messagesToDelete) {
-        const index = chat.indexOf(message);
-        if (index !== -1) {
-            console.debug(`/delname: Deleting message #${index}`, message);
-            chat.splice(index, 1);
+    await withChatSurfaceStructureMutation(async () => {
+        for (const message of messagesToDelete) {
+            const index = chat.indexOf(message);
+            if (index !== -1) {
+                console.debug(`/delname: Deleting message #${index}`, message);
+                chat.splice(index, 1);
+            }
         }
-    }
-
-    await saveChatConditional();
-    await reloadCurrentChat();
+        await saveChatConditional();
+        await reloadCurrentChat();
+    });
 
     toastr.info(t`Deleted ${messagesToDelete.length} messages from ${name}`);
     return '';
@@ -5296,18 +5326,7 @@ async function uploadCharacterAvatar(avatarKey, base64Data, { resizePrompt = fal
             throw new Error(errorText || `Avatar upload failed: ${uploadResponse.status}`);
         }
 
-        const thumbnailUrl = getThumbnailUrl('avatar', avatarKey);
-        await fetch(thumbnailUrl, { method: 'GET', cache: 'reload' });
-        await fetch(`/characters/${avatarKey}`, { method: 'GET', cache: 'reload' });
-
-        const avatarImages = document.querySelectorAll(`img[src^="${thumbnailUrl}"]`);
-        for (const img of avatarImages) {
-            if (img instanceof HTMLImageElement) {
-                const originalSrc = img.src;
-                img.src = '';
-                img.src = originalSrc;
-            }
-        }
+        await refreshCharacterAvatarImages(avatarKey);
 
         return true;
     } catch (error) {
@@ -5949,12 +5968,7 @@ async function messageRoleCallback(args, role) {
     message.is_user = role === 'user';
 
     await eventSource.emit(event_types.MESSAGE_EDITED, modifyAt);
-    const existingMessage = chatElement.find(`.mes[mesid="${modifyAt}"]`);
-    if (existingMessage.length) {
-        const newMessageElement = updateMessageElement(message, { messageId: modifyAt });
-        existingMessage.after(newMessageElement);
-        existingMessage.remove();
-    }
+    rerenderChatMessage(modifyAt);
     await eventSource.emit(event_types.MESSAGE_UPDATED, modifyAt);
     await saveChatConditional();
 
@@ -6015,12 +6029,7 @@ async function messageNameCallback(args, name) {
     }
 
     await eventSource.emit(event_types.MESSAGE_EDITED, modifyAt);
-    const existingMessage = chatElement.find(`.mes[mesid="${modifyAt}"]`);
-    if (existingMessage.length) {
-        const newMessageElement = updateMessageElement(message, { messageId: modifyAt });
-        existingMessage.after(newMessageElement);
-        existingMessage.remove();
-    }
+    rerenderChatMessage(modifyAt);
     await eventSource.emit(event_types.MESSAGE_UPDATED, modifyAt);
     await saveChatConditional();
 
@@ -6102,16 +6111,21 @@ export async function sendMessageAs(args, text) {
     chat_metadata.tainted = true;
 
     if (!isNaN(insertAt) && insertAt >= 0 && insertAt <= chat.length) {
-        chat.splice(insertAt, 0, message);
-        await saveChatConditional();
-        await eventSource.emit(event_types.MESSAGE_RECEIVED, insertAt, 'command');
-        await reloadCurrentChat();
+        await withChatSurfaceStructureMutation(async () => {
+            chat.splice(insertAt, 0, message);
+            await saveChatConditional();
+            await eventSource.emit(event_types.MESSAGE_RECEIVED, insertAt, 'command');
+            await reloadCurrentChat();
+        });
         await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, insertAt, 'command');
     } else {
-        chat.push(message);
-        await eventSource.emit(event_types.MESSAGE_RECEIVED, (chat.length - 1), 'command');
-        addOneMessage(message);
-        await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, (chat.length - 1), 'command');
+        const messageId = chat.length;
+        await withChatSurfaceStructureMutation(async () => {
+            chat.push(message);
+            await eventSource.emit(event_types.MESSAGE_RECEIVED, messageId, 'command');
+            addOneMessage(message);
+        });
+        await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, messageId, 'command');
         await saveChatConditional();
     }
 
@@ -6154,16 +6168,21 @@ export async function sendNarratorMessage(args, text) {
     chat_metadata.tainted = true;
 
     if (!isNaN(insertAt) && insertAt >= 0 && insertAt <= chat.length) {
-        chat.splice(insertAt, 0, message);
-        await saveChatConditional();
-        await eventSource.emit(event_types.MESSAGE_SENT, insertAt);
-        await reloadCurrentChat();
+        await withChatSurfaceStructureMutation(async () => {
+            chat.splice(insertAt, 0, message);
+            await saveChatConditional();
+            await eventSource.emit(event_types.MESSAGE_SENT, insertAt);
+            await reloadCurrentChat();
+        });
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, insertAt);
     } else {
-        chat.push(message);
-        await eventSource.emit(event_types.MESSAGE_SENT, (chat.length - 1));
-        addOneMessage(message);
-        await eventSource.emit(event_types.USER_MESSAGE_RENDERED, (chat.length - 1));
+        const messageId = chat.length;
+        await withChatSurfaceStructureMutation(async () => {
+            chat.push(message);
+            await eventSource.emit(event_types.MESSAGE_SENT, messageId);
+            addOneMessage(message);
+        });
+        await eventSource.emit(event_types.USER_MESSAGE_RENDERED, messageId);
         await saveChatConditional();
     }
 
@@ -6205,10 +6224,13 @@ export async function promptQuietForLoudResponse(who, text) {
 
     chat_metadata.tainted = true;
 
-    chat.push(message);
-    await eventSource.emit(event_types.MESSAGE_SENT, (chat.length - 1));
-    addOneMessage(message);
-    await eventSource.emit(event_types.USER_MESSAGE_RENDERED, (chat.length - 1));
+    const messageId = chat.length;
+    await withChatSurfaceStructureMutation(async () => {
+        chat.push(message);
+        await eventSource.emit(event_types.MESSAGE_SENT, messageId);
+        addOneMessage(message);
+    });
+    await eventSource.emit(event_types.USER_MESSAGE_RENDERED, messageId);
     await saveChatConditional();
 
 }
@@ -6242,16 +6264,21 @@ async function sendCommentMessage(args, text) {
     chat_metadata.tainted = true;
 
     if (!isNaN(insertAt) && insertAt >= 0 && insertAt <= chat.length) {
-        chat.splice(insertAt, 0, message);
-        await saveChatConditional();
-        await eventSource.emit(event_types.MESSAGE_SENT, insertAt);
-        await reloadCurrentChat();
+        await withChatSurfaceStructureMutation(async () => {
+            chat.splice(insertAt, 0, message);
+            await saveChatConditional();
+            await eventSource.emit(event_types.MESSAGE_SENT, insertAt);
+            await reloadCurrentChat();
+        });
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, insertAt);
     } else {
-        chat.push(message);
-        await eventSource.emit(event_types.MESSAGE_SENT, (chat.length - 1));
-        addOneMessage(message);
-        await eventSource.emit(event_types.USER_MESSAGE_RENDERED, (chat.length - 1));
+        const messageId = chat.length;
+        await withChatSurfaceStructureMutation(async () => {
+            chat.push(message);
+            await eventSource.emit(event_types.MESSAGE_SENT, messageId);
+            addOneMessage(message);
+        });
+        await eventSource.emit(event_types.USER_MESSAGE_RENDERED, messageId);
         await saveChatConditional();
     }
 
@@ -6633,7 +6660,7 @@ function setPromptEntryCallback(args, targetState) {
     });
 
     // no need to render for each identifier
-    promptManager.render();
+    promptManager.renderNowAndRefresh();
     promptManager.saveServiceSettings();
     return '';
 }
@@ -6653,6 +6680,29 @@ async function setApiUrlCallback({ api = null, connect = 'true', quiet = 'false'
     const isQuiet = isTrueBoolean(quiet);
     const autoConnect = isTrueBoolean(connect);
     const isClear = isTrueBoolean(clear);
+
+    const isCurrentlyOpenCode = main_api === 'openai' && oai_settings.chat_completion_source === chat_completion_sources.OPENCODE;
+    if (api === chat_completion_sources.OPENCODE || (!api && isCurrentlyOpenCode)) {
+        if (isClear) {
+            $('#opencode_endpoint').val(OPENCODE_ENDPOINT.ZEN).trigger('input');
+            if (autoConnect) triggerApiConnectionButton('#api_button_openai');
+            return '';
+        }
+        if (!url) {
+            return oai_settings.opencode_endpoint || OPENCODE_ENDPOINT.ZEN;
+        }
+        if (!Object.values(OPENCODE_ENDPOINT).includes(url)) {
+            !isQuiet && toastr.warning(t`Valid options are: ${Object.values(OPENCODE_ENDPOINT).join(', ')}`, t`OpenCode service '${url}' is not a valid option.`);
+            return '';
+        }
+        if (!isCurrentlyOpenCode && autoConnect) {
+            toastr.warning(t`OpenCode is not the currently selected API, so we cannot do an auto-connect. Consider switching to it via /api beforehand.`);
+            return '';
+        }
+        $('#opencode_endpoint').val(url).trigger('input');
+        if (autoConnect) triggerApiConnectionButton('#api_button_openai');
+        return oai_settings.opencode_endpoint || OPENCODE_ENDPOINT.ZEN;
+    }
 
     // Special handling for Chat Completion Custom OpenAI compatible, that one can also support API url handling
     const isCurrentlyCustomOpenai = main_api === 'openai' && oai_settings.chat_completion_source === chat_completion_sources.CUSTOM;
@@ -6793,6 +6843,42 @@ async function setApiUrlCallback({ api = null, connect = 'true', quiet = 'false'
         return oai_settings.minimax_endpoint || MINIMAX_ENDPOINT.GLOBAL;
     }
 
+    const isCurrentlyMoonshot = main_api === 'openai' && oai_settings.chat_completion_source === chat_completion_sources.MOONSHOT;
+    if (api === chat_completion_sources.MOONSHOT || (!api && isCurrentlyMoonshot)) {
+        if (isClear) {
+            $('#moonshot_endpoint').val(MOONSHOT_ENDPOINT.GLOBAL).trigger('input');
+
+            if (autoConnect) {
+                triggerApiConnectionButton('#api_button_openai');
+            }
+
+            return '';
+        }
+
+        if (!url) {
+            return oai_settings.moonshot_endpoint || MOONSHOT_ENDPOINT.GLOBAL;
+        }
+
+        const permittedValues = Object.values(MOONSHOT_ENDPOINT);
+        if (!permittedValues.includes(url)) {
+            !isQuiet && toastr.warning(t`Valid options are: ${permittedValues.join(', ')}`, t`Moonshot endpoint '${url}' is not a valid option.`);
+            return '';
+        }
+
+        if (!isCurrentlyMoonshot && autoConnect) {
+            toastr.warning(t`Moonshot AI is not the currently selected API, so we cannot do an auto-connect. Consider switching to it via /api beforehand.`);
+            return '';
+        }
+
+        $('#moonshot_endpoint').val(url).trigger('input');
+
+        if (autoConnect) {
+            triggerApiConnectionButton('#api_button_openai');
+        }
+
+        return oai_settings.moonshot_endpoint || MOONSHOT_ENDPOINT.GLOBAL;
+    }
+
     const isCurrentlyVertexAI = main_api === 'openai' && oai_settings.chat_completion_source === chat_completion_sources.VERTEXAI;
     if (api === chat_completion_sources.VERTEXAI || (!api && isCurrentlyVertexAI)) {
         const defaultRegion = 'us-central1';
@@ -6831,6 +6917,42 @@ async function setApiUrlCallback({ api = null, connect = 'true', quiet = 'false'
         }
 
         return oai_settings.vertexai_region || defaultRegion;
+    }
+
+    const isCurrentlyPollinations = main_api === 'openai' && oai_settings.chat_completion_source === chat_completion_sources.POLLINATIONS;
+    if (api === chat_completion_sources.POLLINATIONS || (!api && isCurrentlyPollinations)) {
+        if (isClear) {
+            $('#pollinations_endpoint').val(POLLINATIONS_ENDPOINT.AUTHENTICATED).trigger('input');
+
+            if (autoConnect) {
+                triggerApiConnectionButton('#api_button_openai');
+            }
+
+            return '';
+        }
+
+        if (!url) {
+            return oai_settings.pollinations_endpoint || POLLINATIONS_ENDPOINT.AUTHENTICATED;
+        }
+
+        const permittedValues = Object.values(POLLINATIONS_ENDPOINT);
+        if (!permittedValues.includes(url)) {
+            !isQuiet && toastr.warning(t`Valid options are: ${permittedValues.join(', ')}`, t`Pollinations endpoint '${url}' is not a valid option.`);
+            return '';
+        }
+
+        if (!isCurrentlyPollinations && autoConnect) {
+            toastr.warning(t`Pollinations API is not the currently selected API, so we cannot do an auto-connect. Consider switching to it via /api beforehand.`);
+            return '';
+        }
+
+        $('#pollinations_endpoint').val(url).trigger('input');
+
+        if (autoConnect) {
+            triggerApiConnectionButton('#api_button_openai');
+        }
+
+        return oai_settings.pollinations_endpoint || POLLINATIONS_ENDPOINT.AUTHENTICATED;
     }
 
     // Special handling for Kobold Classic API

@@ -4,6 +4,17 @@
 
 补充：iOS/iPadOS 的 **分发 Policy（profile + capabilities snapshot）** 属于“合规裁剪/能力分级”问题域，其当前实现快照与维护约束已收敛到 `docs/CurrentState/iOSPolicy.md`，本文件仍聚焦 WKWebView 行为差异与 iOS-only 桥接。
 
+当前系统支持边界：
+
+| iOS/iPadOS | `structuredClone` | Element Fullscreen | 支持级别 |
+| --- | --- | --- | --- |
+| 15.0–15.3 | 上游 vendored polyfill | 关闭 | 有限支持 |
+| 15.4–15.x | WebKit 原生实现 | 关闭 | 有限支持 |
+| 16.0–16.3 | WebKit 原生实现 | 开启 | 有限支持 |
+| 16.4+ | WebKit 原生实现 | 开启 | 完整支持 |
+
+`src/index.html` 已在 `init.js` 前加载 SillyTavern 1.18.0 的 `lib/structured-clone/monkey-patch.js`。它只在全局能力缺失时安装，15.4+ 不替换 WebKit 原生函数。
+
 ## 1. WKWebView safe-area 自动 inset 导致底部死区
 
 ### 1.1 现象
@@ -41,8 +52,8 @@ WKWebView 内部是 `UIScrollView` 承载 Web 内容；在默认行为下，iOS 
 
 实现位置：
 
-- iOS 配置入口：`src-tauri/src/infrastructure/ios_webview.rs` 的 `configure_main_wkwebview()`
-- 调用时机：`src-tauri/src/lib.rs`（主窗口 build 后立刻调用）
+- iOS 配置入口：`src-tauri/crates/tauritavern/src/infrastructure/ios_webview.rs` 的 `configure_main_wkwebview()`
+- 调用时机：`src-tauri/crates/tauritavern/src/app/host/window.rs`（主窗口 build 后立刻调用）
 
 ### 1.5 验收建议
 
@@ -90,11 +101,13 @@ iOS 上“文件选择 / 文件导出”必须交给系统级能力完成：
 
 - 前端扩展入口：`src/scripts/extensions/data-migration/index.js`
 - Host Kernel 路由：`src/tauri/main/routes/extensions-routes.js`
-- iOS-only Tauri commands：`src-tauri/src/presentation/commands/ios_file_bridge_commands.rs`
-- iOS UIKit 封装：
-  - `src-tauri/src/infrastructure/ios_ui.rs`
-- `src-tauri/src/infrastructure/ios_document_picker.rs`
-- `src-tauri/src/infrastructure/ios_share_sheet.rs`
+- iOS-only Tauri commands：`src-tauri/crates/tauritavern/src/presentation/commands/ios_file_bridge_commands.rs`
+- iOS UIKit / picker / share host adapter：
+  - `src-tauri/crates/tauritavern/src/platform/ios_ui.rs`
+  - `src-tauri/crates/tauritavern/src/platform/ios_document_picker.rs`
+  - `src-tauri/crates/tauritavern/src/platform/ios_share_sheet.rs`
+- Data Archive import staging 只暴露 `prepare_data_archive_import_target_path`；不要恢复旧的 `get_data_archive_imports_root`，避免把 staging root 交给前端自行拼路径。
+- 角色卡替换的文件选择同样走 iOS Document Picker + app cache/temp staging；宿主只返回 staged path/原文件名，前端会读成标准 `File` 后继续复用上游 `/api/characters/import` 与 `preserved_name` 语义。当前 native picker 只暴露 Rust 角色导入器真实支持的 `json/png`。
 
 ### 2.5 macOS 元数据导致的“布局歧义”问题
 
@@ -102,10 +115,10 @@ iOS 上“文件选择 / 文件导出”必须交给系统级能力完成：
 
 - `Invalid data: Archive layout is ambiguous`
 
-当前实现会在 **布局扫描** 与 **解压归一化** 两阶段一致忽略 `__MACOSX` 条目，保证这类 zip 可正常导入：
+当前实现会在 **布局扫描** 与 **解压归一化** 时忽略 `__MACOSX` 条目，保证这类 zip 可正常导入：
 
-- `src-tauri/src/infrastructure/persistence/data_archive/import/layout.rs`
-- `src-tauri/src/infrastructure/persistence/data_archive/import/extract.rs`
+- `src-tauri/crates/tt-adapter-archive/src/data_archive/import/layout.rs`
+- `src-tauri/crates/tt-adapter-archive/src/data_archive/import/extract.rs`
 
 ## 3. 通用 iOS 导出桥（聊天 / WorldInfo / 角色卡等）
 
@@ -149,18 +162,18 @@ iOS 上“文件选择 / 文件导出”必须交给系统级能力完成：
 - 前端导出基础设施：`src/scripts/file-export.js`
 - 下载桥：`src/tauri/main/download-bridge.js`
 - 导出反馈：`src/scripts/download-feedback.js`
-- iOS share 命令：`src-tauri/src/presentation/commands/ios_file_bridge_commands.rs`
+- iOS share 命令：`src-tauri/crates/tauritavern/src/presentation/commands/ios_file_bridge_commands.rs`
 
 ### 3.6 iOS Skill 导入
 
-Skill 导入使用独立命令 `ios_pick_skill_import_archive`：
+Skill 导入使用独立命令 `ios_pick_skill_import_archives`：
 
-- `UIDocumentPickerViewController` 允许选择 zip 或普通 data 文件，保证默认 `.zip` Skill 归档与历史 `.ttskill` 归档都可被选中；
-- Rust 命令把选中的安全作用域文件复制到 app cache/temp 下的 `tauritavern-skill-import-staging`；
-- 前端仍只收到 `{ kind: 'archiveFile', path }`，后续预览与安装继续走 Skill repository 的真实路径契约；
-- 用户放弃导入时由 `api.skill.discardPickedImport()` 清理 staged 文件，安装完成或失败后由 `installImport()` 自动清理。
+- `UIDocumentPickerViewController` 允许选择一个或多个 zip / 普通 data 文件，保证默认 `.zip` Skill 归档与历史 `.ttskill` 归档都可被选中；
+- Rust 命令逐个把选中的安全作用域文件复制到 app cache/temp 下的 `tauritavern-skill-import-staging`；任一复制失败时清理本次命令已经 staged 的文件并返回错误；
+- 前端仍只收到一个或多个 `{ kind: 'archiveFile', path }`，后续预览与安装继续逐项走 Skill repository 的真实路径契约；
+- 用户放弃某个输入时由 `api.skill.discardPickedImport(input)` 清理；放弃整个批次时调用无参数的 `discardPickedImport()`。安装完成或失败后由 `installImport()` 自动清理对应输入。
 
-## 4. WKWebView Fullscreen API（iOS 16+）
+## 4. WKWebView Element Fullscreen（iOS 16+ 启用）
 
 ### 4.1 现象
 
@@ -173,14 +186,22 @@ Skill 导入使用独立命令 `ios_pick_skill_import_archive`：
 
 ### 4.3 已落地方案
 
-- 继续复用 `src-tauri/src/infrastructure/ios_webview.rs` 的主 WebView 配置入口，在 `configure_main_wkwebview()` 内统一完成两类 native 配置：
+- 继续复用 `src-tauri/crates/tauritavern/src/infrastructure/ios_webview.rs` 的主 WebView 配置入口，在 `configure_main_wkwebview()` 内统一完成两类 native 配置：
   - 关闭 `scrollView` 的 safe-area 自动 inset 调整；
-  - 开启 `WKPreferences.setElementFullscreenEnabled(true)`。
+  - 仅在 iOS 16.0+ 开启 `WKPreferences.setElementFullscreenEnabled(true)`。
 - 这样角色卡、JS-Slash-Runner、同源 iframe 的 fullscreen 事件、退出语义和上游契约保持一致，宿主只补齐平台能力，不改前端行为。
 
 ### 4.4 支持边界
 
-- 该能力依赖 iOS 16 的 app-embedded WKWebView Fullscreen API，因此项目 iOS 支持线提升到 `iOS 16+`。
+- 公开 `WKPreferences.elementFullscreenEnabled` 从 iOS 15.4 可用且默认关闭；TauriTavern 仍将 iOS 16.0 作为产品 fullscreen feature floor。
+- iOS 15 保持 WebKit 默认关闭，不删除 iframe 权限、不改写 `requestFullscreen()`，让页面继续观察标准浏览器失败语义。
+- iOS 16.0–16.3 可使用 fullscreen，但仍属于有限支持；完整支持从 iOS 16.4 开始。
+
+### 4.5 构建版本契约
+
+- 最低部署版本是 `15.0`，规范值写在 `tauri.conf.json` 的 `bundle.iOS.minimumSystemVersion`。
+- `gen/apple/project.yml`、`Podfile` 与已提交 `.xcodeproj` 必须保持同值；Xcode pre-build script 会将真实 `IPHONEOS_DEPLOYMENT_TARGET` 与 Tauri 配置比较，不一致时直接失败。
+- 当前 `project.yml` 未覆盖已提交 Apple host 的全部自定义 Info.plist、scheme 与签名状态。不要直接运行 XcodeGen 或 `tauri ios init` 覆盖工程；修改后只审查必要 diff，否则可能删除高刷、后台模式与文件类型声明。
 
 ## 5. iOS 分发 Policy（当前状态）
 
@@ -210,14 +231,14 @@ iOS 18+ 支持 Home Screen 图标的 `Any` / `Dark` / `Tinted` 外观。若 AppI
 
 - 生成脚本：`scripts/generate-ios-app-icon-variants.swift`
 - 构建期校验/展平：`scripts/ios-opaque-app-icons.swift`
-- 资产目录：`src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset`
+- 资产目录：`src-tauri/crates/tauritavern/gen/apple/Assets.xcassets/AppIcon.appiconset`
 
 重新生成：
 
 ```sh
 xcrun --sdk macosx swift scripts/generate-ios-app-icon-variants.swift \
-  src-tauri/icons/icon.png \
-  src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset
+  src-tauri/crates/tauritavern/icons/icon.png \
+  src-tauri/crates/tauritavern/gen/apple/Assets.xcassets/AppIcon.appiconset
 ```
 
 回归验证：
@@ -225,12 +246,37 @@ xcrun --sdk macosx swift scripts/generate-ios-app-icon-variants.swift \
 ```sh
 xcrun actool --compile /tmp/tt-appicon \
   --platform iphonesimulator \
-  --minimum-deployment-target 16.0 \
+  --minimum-deployment-target 15.0 \
   --app-icon AppIcon \
   --output-partial-info-plist /tmp/tt-appicon/partial.plist \
-  src-tauri/gen/apple/Assets.xcassets
+  src-tauri/crates/tauritavern/gen/apple/Assets.xcassets
 
 xcrun assetutil --info /tmp/tt-appicon/Assets.car
 ```
 
 输出应包含 `UIAppearanceDark` 与 `ISAppearanceTintable`。若未来重新运行 `tauri icon`，必须重新生成并保留这三个 appearance 变体。
+
+## 7. AI 生成后台执行
+
+iOS Chat Completion 的后台租约由 Rust `ChatCompletionService` 持有，不依赖 WKWebView 的 Promise、Channel 或定时器继续运行：
+
+- iOS 26+ 的用户可见生成使用 `BGContinuedProcessingTask`，任务由用户操作立即提交，并在系统 Live Activity 中展示；
+- 流式生成以累计收到的 provider 响应字节作为单调递增的真实进度。因为 LLM 输出总量事先未知，`NSProgress` 保持 indeterminate，成功结束时再收敛到 100%；
+- iOS 16–25，以及不会展示系统 UI 的 quiet 内部生成，继续使用 `beginBackgroundTask`。`BGContinuedProcessingTask` 不适合无明确用户意图却会显示 Live Activity 的后台工作。
+
+生命周期契约：
+
+- 普通与流式 Chat Completion 在网络请求前取得后台租约；
+- 成功、失败或用户取消都会由 Rust 立即完成对应的系统任务；
+- 若系统先触发 expiration handler，原生适配器只结束后台保护并记录警告，不把“后台保护结束”伪装成“生成失败”；
+- 系统随后可以挂起应用；若进程仍存活，生成在恢复执行后继续等待真实 provider 结果、网络错误或用户取消；
+- 已产生的流事件仍由 Rust 进程内会话保留，WebView 恢复后通过 `after_seq` 继续读取；
+- 无法取得后台租约只记录明确警告，不阻塞仍在前台可正常完成的生成。
+
+当前不使用 `BGAppRefreshTask` / `BGProcessingTask`，因为它们由系统择机调度，不能表达用户点击后立即开始的聊天生成。`BGContinuedProcessingTask` 只拥有系统后台执行权和展示状态；真正的网络请求、取消和流会话生命周期仍由既有 Rust 服务负责，不引入第二套生成调度状态机。
+
+## 8. LAN Sync Bonjour 发现
+
+LAN 发现通过系统 Bonjour 浏览和注册 `_tauritavern._tcp`。Info.plist 声明 `NSLocalNetworkUsageDescription` 与 `NSBonjourServices`，由用户授予本地网络访问权限；此路径不需要 Multicast Networking entitlement。macOS 使用相同的系统后端与用途声明。
+
+权限行为以真机签名包验证，后台发现受 iOS 生命周期限制。配置入口见 [Apple host 工程](../src-tauri/crates/tauritavern/gen/apple/project.yml)，功能边界见[同步总览](CurrentState/Sync.md)。

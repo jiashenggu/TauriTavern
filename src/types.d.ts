@@ -16,15 +16,16 @@ interface Window {
     // SillyTavern ecosystem library shim ABI
     _?: any;
 
+    // Toastr notification shim (SillyTavern global)
+    toastr?: {
+        error?: (message: string, title?: string) => void;
+        warning?: (message: string, title?: string) => void;
+        success?: (message: string, title?: string) => void;
+        info?: (message: string, title?: string) => void;
+    };
+
     __TAURITAVERN_THUMBNAIL__?: (type: string, file: string, useTimestamp?: boolean) => string;
-    __TAURITAVERN_THUMBNAIL_BLOB_URL__?: (
-        type: string,
-        file: string,
-        options?: { animated?: boolean; useTimestamp?: boolean },
-    ) => Promise<string>;
     __TAURITAVERN_BACKGROUND_PATH__?: (file: string) => string;
-    __TAURITAVERN_AVATAR_PATH__?: (file: string) => string | null;
-    __TAURITAVERN_PERSONA_PATH__?: (file: string) => string;
 
     __TAURITAVERN_IMPORT_ARCHIVE_PICKER__?: {
         onNativeResult: (payload: any) => void;
@@ -64,15 +65,8 @@ type TauriTavernHostInvokeApi = {
 };
 
 type TauriTavernHostAssetsApi = {
-    thumbnailUrl?: (type: string, file: string, useTimestamp?: boolean) => string;
-    thumbnailBlobUrl?: (
-        type: string,
-        file: string,
-        options?: { animated?: boolean; useTimestamp?: boolean },
-    ) => Promise<string>;
-    backgroundPath?: (file: string) => string;
-    avatarPath?: (file: string) => string | null;
-    personaPath?: (file: string) => string;
+    thumbnailUrl: (type: string, file: string, useTimestamp?: boolean) => string;
+    backgroundPath: (file: string) => string;
 };
 
 type TauriTavernChatApi = {
@@ -91,7 +85,6 @@ type TauriTavernAgentRunStatus =
     | 'calling_model'
     | 'dispatching_tool'
     | 'applying_workspace_patch'
-    | 'creating_checkpoint'
     | 'awaiting_host_commit'
     | 'finishing'
     | 'completed'
@@ -109,10 +102,11 @@ type TauriTavernAgentRunEvent = {
     timestamp: string;
     level: 'debug' | 'info' | 'warn' | 'error';
     type: string;
-    payload?: any;
+    // Payload shape varies by event type; consumers narrow by field.
+    payload?: unknown;
 };
 
-type TauriTavernAgentInvocationKind = 'root' | 'subagent' | 'handoff';
+type TauriTavernAgentInvocationKind = 'root' | 'subagent' | 'handoff' | 'revision';
 
 type TauriTavernAgentInvocationStatus =
     | 'created'
@@ -153,6 +147,29 @@ type TauriTavernAgentRunTimelineDelegationEdge = {
     updatedAt: string;
 };
 
+type TauriTavernAgentTaskDetail = {
+    runId: string;
+    taskId: string;
+    parentInvocationId: string;
+    childInvocationId: string;
+    targetProfileId: string;
+    workspaceKey: string;
+    continuation: 'return_to_parent' | 'transfer_control';
+    status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+    task: {
+        objective: string;
+        title?: string;
+        [key: string]: unknown;
+    };
+    resultRef: string | null;
+    result: {
+        summary: string;
+        summaryRef: string | null;
+        output: Record<string, unknown>;
+    } | null;
+    error: string | null;
+};
+
 type TauriTavernAgentRunTimelineProjection = {
     foregroundInvocationIds: string[];
     invocations: TauriTavernAgentRunTimelineInvocation[];
@@ -165,7 +182,63 @@ type TauriTavernAgentRunHandle = {
     stableChatId: string;
     generationType: string;
     status: TauriTavernAgentRunStatus;
+    afterSeq?: number;
 };
+
+type TauriTavernAgentRunCheckpoint = {
+    run: TauriTavernAgentRunHandle;
+    terminalSeq: number;
+    presentation: Record<string, any> | null;
+    nextStep: 'model' | 'tools' | 'handoff' | 'finalize' | 'finished' | 'unavailable';
+    round: number;
+    maxRounds: number;
+    blockedReason: string | null;
+};
+
+type TauriTavernAgentRunLiveToolCall =
+    | {
+        toolId: 'builtin:workspace.write_file';
+        invocationId: string;
+        invocationExitPolicy: TauriTavernAgentInvocationExitPolicy;
+        toolCallIndex: number;
+        path: string;
+        content: string;
+        contentWords: number;
+    }
+    | {
+        toolId: 'builtin:workspace.apply_patch';
+        invocationId: string;
+        invocationExitPolicy: TauriTavernAgentInvocationExitPolicy;
+        toolCallIndex: number;
+        path: string;
+        oldString: string;
+        oldStringWords: number;
+        newString: string;
+        newStringWords: number;
+    };
+
+type TauriTavernAgentRunLiveReasoning = {
+    invocationId: string;
+    invocationExitPolicy: TauriTavernAgentInvocationExitPolicy;
+    text: string;
+    toolIds: string[];
+};
+
+type TauriTavernAgentRunLiveUpdate =
+    | { type: 'reasoningReplace'; reasoning: TauriTavernAgentRunLiveReasoning }
+    | { type: 'reasoningAppend'; invocationId: string; text: string; toolIds: string[] }
+    | { type: 'reasoningRemove'; invocationId: string }
+    | { type: 'snapshot'; calls: TauriTavernAgentRunLiveToolCall[]; reasoning: TauriTavernAgentRunLiveReasoning[] }
+    | {
+        type: 'append';
+        invocationId: string;
+        toolCallIndex: number;
+        field: 'path' | 'content' | 'oldString' | 'newString';
+        text: string;
+        wordDelta: number;
+    }
+    | { type: 'replace'; call: TauriTavernAgentRunLiveToolCall }
+    | { type: 'remove'; invocationId: string; toolCallIndex: number };
 
 type TauriTavernAgentGuidanceResult = {
     runId: string;
@@ -314,8 +387,9 @@ type TauriTavernAgentModelTurn = {
     }>;
     toolCalls: Array<{
         callId: string;
+        toolId: string;
         name: string;
-        modelName?: string;
+        modelAlias?: string;
     }>;
 };
 
@@ -326,15 +400,29 @@ type TauriTavernAgentProfileSummary = {
     directRunnable: boolean;
 };
 
-type TauriTavernAgentToolSpec = {
-    name: string;
-    modelName: string;
+type TauriTavernAgentToolInputSchema = {
+    properties?: Record<string, unknown>;
+    required?: string[];
+};
+
+type TauriTavernAgentToolAnnotations = {
+    readOnly?: boolean;
+    mutating?: boolean;
+    control?: boolean;
+};
+
+type TauriTavernAgentToolCatalogItem = {
+    id: string;
+    nativeName: string;
     title: string;
     description: string;
-    inputSchema: any;
-    outputSchema?: any;
-    annotations?: any;
-    source: string;
+    inputSchema: TauriTavernAgentToolInputSchema;
+    outputSchema?: unknown;
+    annotations?: TauriTavernAgentToolAnnotations;
+    source: 'builtin' | 'mcp';
+    registrationId?: string;
+    serverDisplayName?: string;
+    permission?: 'off' | 'ask' | 'allow';
 };
 
 type TauriTavernAgentProfileDefinition = {
@@ -358,11 +446,32 @@ type TauriTavernAgentProfileDefinition = {
     };
     run: {
         presentation: TauriTavernAgentRunPresentation;
+        stream: boolean;
         directRunnable: boolean;
         modelRetry: {
             maxRetries: number;
             intervalMs: number;
         };
+    };
+    context: {
+        // Negative means full history, zero means no initial history,
+        // positive means a recent-message window.
+        initialChatHistoryMessages: number;
+        includeActivatedWorldInfo: boolean;
+    };
+    delegation: {
+        canDelegate: boolean;
+        canHandoff: boolean;
+        callable: boolean;
+        allowAsSubagent: boolean;
+        allowAsHandoffTarget: boolean;
+        allowNestedDelegation: boolean;
+        allowedCallers: string[];
+        descriptionForAgents: string | null;
+        maxConcurrentInvocations: number;
+        maxInvocationsPerRun: number;
+        resultBudgetTokens: number;
+        maxHandoffDepth: number;
     };
     instructions: {
         agentSystemPrompt?: string | null;
@@ -370,12 +479,10 @@ type TauriTavernAgentProfileDefinition = {
     tools: {
         allow: string[];
         deny?: string[];
-        toolDescriptions?: Record<string, {
-            description?: string;
-            properties?: Record<string, string>;
-        }>;
+        toolDescriptions?: Record<string, TauriTavernToolDescriptionOverride>;
         maxRounds: number;
         maxCallsPerRun: number;
+        mcpResultInlineCharLimit: number;
         maxCallsPerTool?: Record<string, number>;
     };
     skills: {
@@ -465,7 +572,10 @@ type TauriTavernAgentProfilesApi = {
 };
 
 type TauriTavernAgentToolsApi = {
-    list: () => Promise<{ tools: TauriTavernAgentToolSpec[] }>;
+    list: () => Promise<{
+        tools: TauriTavernAgentToolCatalogItem[];
+        diagnostics: Array<{ toolId?: string; code: string; message: string }>;
+    }>;
 };
 
 type TauriTavernAgentPromptAssemblyApi = {
@@ -498,6 +608,15 @@ type TauriTavernAgentPromptAssemblyApi = {
         generationIntent: any;
         assembly: any;
     }>;
+    buildCurrentModelConnectionSnapshot: (input: {
+        settings: Record<string, any>;
+        model: string;
+        secretId?: string | null;
+    }) => Promise<Record<string, any>>;
+    applyCurrentModelConnectionSnapshot: (input: {
+        settings: Record<string, any>;
+        currentModelConnection: Record<string, any>;
+    }) => Promise<Record<string, any>>;
 };
 
 type TauriTavernAgentRetentionApi = {
@@ -514,6 +633,8 @@ type TauriTavernAgentRetentionApi = {
 };
 
 type TauriTavernAgentApi = {
+    readCheckpoint: (runId: string) => Promise<TauriTavernAgentRunCheckpoint>;
+    resume: (input: { runId: string; additionalRounds?: number; checkpoint?: TauriTavernAgentRunCheckpoint; revisionGuidance?: string }) => Promise<TauriTavernAgentRunHandle>;
     startRunWithPromptSnapshot: (input: {
         chatRef: TauriTavernChatRef;
         stableChatId?: string;
@@ -523,7 +644,7 @@ type TauriTavernAgentApi = {
         frozenRunInputSnapshot?: any;
         generationIntent?: any;
         presentation?: TauriTavernAgentRunPresentation;
-        options?: { presentation?: TauriTavernAgentRunPresentation; stream?: boolean };
+        options?: { presentation?: TauriTavernAgentRunPresentation; stream?: boolean; startWithEmptyPersist?: boolean };
     }) => Promise<TauriTavernAgentRunHandle>;
     startRunFromLegacyGenerate: (input?: {
         chatRef?: TauriTavernChatRef;
@@ -533,7 +654,7 @@ type TauriTavernAgentApi = {
         profileId?: string | null;
         generationIntent?: any;
         presentation?: TauriTavernAgentRunPresentation;
-        options?: { presentation?: TauriTavernAgentRunPresentation; stream?: false };
+        options?: { presentation?: TauriTavernAgentRunPresentation; stream?: boolean; startWithEmptyPersist?: boolean };
     }) => Promise<TauriTavernAgentRunHandle>;
     cancel: (runId: string) => Promise<TauriTavernAgentRunHandle>;
     submitGuidance: (input: {
@@ -562,11 +683,22 @@ type TauriTavernAgentApi = {
         round: number;
         maxChars?: number;
     }) => Promise<TauriTavernAgentModelTurn>;
+    readTaskDetail: (input: {
+        runId: string;
+        taskId: string;
+        includeResult?: boolean;
+    }) => Promise<TauriTavernAgentTaskDetail>;
     subscribe: (
         runId: string,
         handler: (event: TauriTavernAgentRunEvent) => void,
         options?: { afterSeq?: number; limit?: number; intervalMs?: number; onError?: (error: unknown) => void },
     ) => TauriTavernHostUnsubscribe;
+    subscribeLiveProjection: (
+        runId: string,
+        handler: (update: TauriTavernAgentRunLiveUpdate) => void,
+        options?: { onError?: (error: unknown) => void },
+    ) => TauriTavernHostUnsubscribe;
+    settleChatPresentation: (handle: Pick<TauriTavernAgentRunHandle, 'runId'>) => Promise<void>;
     profiles: TauriTavernAgentProfilesApi;
     tools: TauriTavernAgentToolsApi;
     promptAssembly: TauriTavernAgentPromptAssemblyApi;
@@ -582,8 +714,6 @@ type TauriTavernAgentApi = {
         runs: TauriTavernAgentRunSummary[];
         nextCursor?: TauriTavernAgentRunListCursor;
     }>;
-    readDiff: () => never;
-    rollback: () => never;
 };
 
 type TauriTavernLlmConnectionSummary = {
@@ -609,7 +739,7 @@ type TauriTavernLlmConnectionDefinition = {
         sourceSpecific?: Record<string, any>;
     };
     auth: {
-        secretRef: {
+        secretRef?: {
             key: string;
             id: string;
             labelSnapshot?: string;
@@ -618,6 +748,8 @@ type TauriTavernLlmConnectionDefinition = {
     routing?: {
         reverseProxy?: {
             url: string;
+        } | {
+            preset: string;
         };
     };
     adapterHints?: {
@@ -625,6 +757,8 @@ type TauriTavernLlmConnectionDefinition = {
         customIncludeHeaders?: string;
         customIncludeBody?: string;
         customExcludeBody?: string;
+        claudePromptCaching?: 'enabled';
+        openaiResponsesMode?: 'websocket';
     };
     capabilities?: {
         streaming?: string;
@@ -639,6 +773,122 @@ type TauriTavernLlmConnectionsApi = {
     }>;
     save: (input: TauriTavernLlmConnectionDefinition | { connection: TauriTavernLlmConnectionDefinition }) => Promise<void>;
     delete: (input: string | { connectionId: string } | { connection_id: string }) => Promise<void>;
+};
+
+type TauriTavernMcpServerState = 'active' | 'paused';
+type TauriTavernMcpToolPermission = 'off' | 'ask' | 'allow';
+type TauriTavernMcpProtocolVersion = 'auto' | '2026-07-28' | '2025-11-25' | '2025-06-18' | '2025-03-26';
+
+type TauriTavernToolDescriptionOverride = {
+    description?: string;
+    properties?: Record<string, string>;
+};
+
+type TauriTavernMcpServer = {
+    id: string;
+    displayName: string;
+    endpoint: string;
+    headers: Record<string, string>;
+    protocolVersion: TauriTavernMcpProtocolVersion;
+    state: TauriTavernMcpServerState;
+    toolPermissions: Record<string, Exclude<TauriTavernMcpToolPermission, 'off'>>;
+    toolDescriptionOverrides: Record<string, TauriTavernToolDescriptionOverride>;
+};
+
+type TauriTavernMcpTool = {
+    id: string;
+    nativeName: string;
+    title?: string;
+    description?: string;
+    inputSchema: Record<string, unknown>;
+    outputSchema?: Record<string, unknown>;
+    annotations: Record<string, unknown>;
+    permission: TauriTavernMcpToolPermission;
+};
+
+type TauriTavernMcpDiscoveryResult = {
+    registrationId: string;
+    protocolVersion: string;
+    serverName?: string;
+    serverVersion?: string;
+    tools: TauriTavernMcpTool[];
+    diagnostics: Array<{ code: string; nativeName?: string; message: string }>;
+    staleTools: Array<{ nativeName: string; permission: Exclude<TauriTavernMcpToolPermission, 'off'> }>;
+};
+
+type TauriTavernMcpCallDiagnostic = {
+    code: string;
+    message: string;
+    contentIndex?: number;
+};
+
+type TauriTavernMcpTestCallOutcome =
+    | {
+        outcome: 'known_response';
+        response:
+            | {
+                kind: 'tool_result';
+                isError: boolean;
+                textBlocks: Array<{ index: number; text: string }>;
+                structuredJson?: string;
+                diagnostics: TauriTavernMcpCallDiagnostic[];
+            }
+            | {
+                kind: 'server_error';
+                code: number;
+                message: string;
+                dataJson?: string;
+            }
+            | {
+                kind: 'unsupported_response';
+                responseType: string;
+                message: string;
+            };
+    }
+    | { outcome: 'not_sent'; code: string; message: string }
+    | { outcome: 'outcome_unknown'; code: string; message: string };
+
+type TauriTavernMcpApi = {
+    servers: {
+        list: () => Promise<{
+            servers: TauriTavernMcpServer[];
+            storageIssues: Array<{ fileName: string; message: string }>;
+        }>;
+        create: (input: {
+            displayName: string;
+            endpoint: string;
+            headers?: Record<string, string>;
+            protocolVersion?: TauriTavernMcpProtocolVersion;
+        }) => Promise<TauriTavernMcpServer>;
+        update: (input: {
+            registrationId: string;
+            displayName: string;
+            endpoint: string;
+            headers: Record<string, string>;
+            protocolVersion: TauriTavernMcpProtocolVersion;
+        }) => Promise<TauriTavernMcpServer>;
+        setState: (input: { registrationId: string; state: TauriTavernMcpServerState }) => Promise<TauriTavernMcpServer>;
+        remove: (input: string | { registrationId: string }) => Promise<void>;
+        discover: (input: string | { registrationId: string }) => Promise<TauriTavernMcpDiscoveryResult>;
+        refresh: (input: string | { registrationId: string }) => Promise<TauriTavernMcpDiscoveryResult>;
+    };
+    tools: {
+        setPermission: (input: {
+            registrationId: string;
+            nativeName: string;
+            permission: TauriTavernMcpToolPermission;
+        }) => Promise<TauriTavernMcpServer>;
+        setDescriptionOverride: (input: {
+            registrationId: string;
+            nativeName: string;
+            override: TauriTavernToolDescriptionOverride | null;
+        }) => Promise<TauriTavernMcpServer>;
+        testCall: (input: {
+            registrationId: string;
+            nativeName: string;
+            argumentsJson: string;
+        }, options?: { signal?: AbortSignal }) => Promise<TauriTavernMcpTestCallOutcome>;
+    };
 };
 
 type TauriTavernSkillFileKind = 'text' | 'binary';
@@ -698,24 +948,25 @@ type TauriTavernSkillImportInput =
     | {
         kind: 'inlineFiles';
         files: TauriTavernSkillInlineFile[];
-        source?: any;
+        source?: unknown;
     }
     | {
         kind: 'directory';
         path: string;
-        source?: any;
+        source?: unknown;
     }
     | {
         kind: 'archiveFile';
         path: string;
-        source?: any;
+        skillRoot?: string;
+        source?: unknown;
     }
     | {
         kind: 'archiveBase64';
         fileName: string;
         contentBase64: string;
         sha256?: string;
-        source?: any;
+        source?: unknown;
     };
 
 type TauriTavernSkillFileRef = {
@@ -734,7 +985,7 @@ type TauriTavernSkillImportPreview = {
         installedHash?: string;
     };
     warnings: string[];
-    source: any;
+    source: unknown;
 };
 
 type TauriTavernSkillInstallResult = {
@@ -752,11 +1003,11 @@ type TauriTavernSkillReadResult = {
     words: number;
     totalChars: number;
     totalWords: number;
-    startChar: number;
-    endChar: number;
     totalLines: number;
     startLine: number;
     endLine: number;
+    nextStartLine?: number;
+    lineTruncated: boolean;
     bytes: number;
     sha256: string;
     truncated: boolean;
@@ -773,6 +1024,9 @@ type TauriTavernSkillApi = {
     list: (options?: { scope?: TauriTavernSkillScopeFilter; filter?: TauriTavernSkillScopeFilter }) => Promise<TauriTavernSkillIndexEntry[]>;
     listFiles: (options: { scope?: TauriTavernSkillScope; name: string }) => Promise<TauriTavernSkillFileRef[]>;
     pickImportArchive: () => Promise<TauriTavernSkillImportInput | null>;
+    pickImportArchives: () => Promise<TauriTavernSkillImportInput[] | null>;
+    pickImportDirectories: () => Promise<TauriTavernSkillImportInput[] | null>;
+    discoverImports: (options: { input: TauriTavernSkillImportInput }) => Promise<TauriTavernSkillImportInput[]>;
     discardPickedImport: (input?: TauriTavernSkillImportInput | null) => Promise<void>;
     downloadImport: (options: { url: string }) => Promise<TauriTavernSkillImportInput>;
     previewImport: (options: {
@@ -788,10 +1042,8 @@ type TauriTavernSkillApi = {
         scope?: TauriTavernSkillScope;
         name: string;
         path: string;
-        maxChars?: number;
         startLine?: number;
         lineCount?: number;
-        startChar?: number;
     }) => Promise<TauriTavernSkillReadResult>;
     writeFile: (options: {
         scope?: TauriTavernSkillScope;
@@ -811,7 +1063,7 @@ type TauriTavernSkillApi = {
     retargetScope: (request: {
         fromScope: TauriTavernSkillScope;
         toScope: TauriTavernSkillScope;
-    }) => Promise<any>;
+    }) => Promise<unknown>;
 };
 
 type TauriTavernFrontendLogsApi = {
@@ -844,6 +1096,7 @@ type TauriTavernLlmApiLogsApi = {
 type TauriTavernDevApi = {
     frontendLogs: TauriTavernFrontendLogsApi;
     backendLogs: TauriTavernBackendLogsApi;
+    exportBundle: () => Promise<string>;
     llmApiLogs: TauriTavernLlmApiLogsApi;
 };
 
@@ -924,10 +1177,89 @@ type TauriTavernLayoutApi = {
     ) => Promise<TauriTavernHostUnsubscribe>;
 };
 
+type TauriTavernCharacterCardsPickOptions = {
+    multiple?: boolean;
+    title?: string;
+};
+
+type TauriTavernCharacterCardsApi = {
+    isNativePickerAvailable: () => boolean;
+    pickFiles: (options?: TauriTavernCharacterCardsPickOptions) => Promise<File[] | null>;
+};
+
+type TauriTavernChatSurfaceDisposable = (() => void) | { dispose: () => void };
+
+type TauriTavernChatSurfaceDetachedContext = {
+    readonly mesid: number;
+    readonly content: HTMLElement;
+};
+
+type TauriTavernChatSurfaceMountedContext = TauriTavernChatSurfaceDetachedContext & {
+    readonly element: HTMLElement;
+    readonly signal: AbortSignal;
+};
+
+type TauriTavernChatSurfaceRuntimeContext = {
+    readonly mesid: number;
+    readonly source: Element;
+    readonly element: HTMLElement;
+    readonly content: HTMLElement;
+    readonly signal: AbortSignal;
+};
+
+type TauriTavernChatSurfaceRuntimeClaims = {
+    claim: (
+        source: Element,
+        activate: (context: TauriTavernChatSurfaceRuntimeContext) => TauriTavernChatSurfaceDisposable,
+    ) => void;
+};
+
+type TauriTavernChatSurfaceParticipant = {
+    id: string;
+    protocolVersion: 1;
+    prepareContent?: (
+        context: TauriTavernChatSurfaceDetachedContext,
+        claims: TauriTavernChatSurfaceRuntimeClaims,
+    ) => void;
+    didMount?: (
+        context: TauriTavernChatSurfaceMountedContext,
+    ) => void | TauriTavernChatSurfaceDisposable;
+    didCommitContent?: (
+        context: TauriTavernChatSurfaceMountedContext,
+    ) => void | TauriTavernChatSurfaceDisposable;
+};
+
+type TauriTavernChatSurfaceRegistration = {
+    fault: (error: unknown) => void;
+};
+
+type TauriTavernChatSurfaceContentProcessor = {
+    id: string;
+    prepare: (
+        context: { readonly message: ChatMessage; readonly mesid: number; readonly signal: AbortSignal },
+        renderBase: () => Promise<string>,
+    ) => string | Promise<string>;
+};
+
+type TauriTavernChatSurfaceApi = {
+    readonly protocolVersion: 1;
+    isManagedOwnershipRequired: () => boolean;
+    registerParticipant: (
+        participant: TauriTavernChatSurfaceParticipant,
+    ) => TauriTavernChatSurfaceRegistration;
+    registerContentProcessor: (
+        processor: TauriTavernChatSurfaceContentProcessor,
+    ) => { refresh: () => Promise<void> };
+};
+
 type TauriTavernHostApi = {
+    db?: import('./tauri/main/api/db-types').DatabaseApi;
     chat?: TauriTavernChatApi;
+    chatSurface?: TauriTavernChatSurfaceApi;
+    characterCards?: TauriTavernCharacterCardsApi;
     agent?: TauriTavernAgentApi;
     llmConnections?: TauriTavernLlmConnectionsApi;
+    mcp?: TauriTavernMcpApi;
     skill?: TauriTavernSkillApi;
     layout?: TauriTavernLayoutApi;
     dev?: TauriTavernDevApi;
@@ -936,7 +1268,7 @@ type TauriTavernHostApi = {
 };
 
 type TauriTavernHostAbi = {
-    abiVersion: number;
+    abiVersion: 1;
     traceHeader: string;
     ready: Promise<void> | null;
     invoke: TauriTavernHostInvokeApi;
@@ -967,7 +1299,7 @@ type TauriTavernLlmApiRawKind = 'json' | 'sse';
 type TauriTavernLlmApiLogIndexEntry = {
     id: number;
     timestampMs: number;
-    level: 'INFO' | 'ERROR';
+    level: 'INFO' | 'WARN' | 'ERROR';
     ok: boolean;
     source: string;
     model: string | null;
@@ -979,7 +1311,7 @@ type TauriTavernLlmApiLogIndexEntry = {
 type TauriTavernLlmApiLogPreview = {
     id: number;
     timestampMs: number;
-    level: 'INFO' | 'ERROR';
+    level: 'INFO' | 'WARN' | 'ERROR';
     ok: boolean;
     source: string;
     model: string | null;
@@ -1052,7 +1384,7 @@ type TauriTavernChatHistoryPage = {
 };
 
 type TauriTavernChatWindowInfo = {
-    mode: 'windowed' | 'off';
+    mode: 'off';
     chatKind: TauriTavernChatRef['kind'];
     chatRef: TauriTavernChatRef;
     totalCount: number;
@@ -1061,7 +1393,7 @@ type TauriTavernChatWindowInfo = {
 };
 
 type TauriTavernChatMessageSearchFilters = {
-    role?: 'user' | 'assistant' | 'system';
+    role?: 'user' | 'assistant' | 'system' | 'tool';
     startIndex?: number;
     endIndex?: number;
     scanLimit?: number;
@@ -1071,7 +1403,7 @@ type TauriTavernChatMessageSearchHit = {
     index: number;
     score: number;
     snippet: string;
-    role: 'user' | 'assistant' | 'system';
+    role: 'user' | 'assistant' | 'system' | 'tool';
     text: string;
 };
 

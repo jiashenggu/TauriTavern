@@ -1,7 +1,7 @@
 // @ts-check
 
 import { getByPath, mergeObjects, setByPath, unsetByPath } from './form-object-utils.js';
-import { formDataToCreateCharacterDto, parseJsonObjectStrict } from './character-create-mapper.js';
+import { formDataToCreateCharacterDto } from './character-create-mapper.js';
 import { assertCharacterAvatarFileName } from './character-identity.js';
 import { parseCropParam } from './character-request-utils.js';
 
@@ -11,7 +11,6 @@ import { parseCropParam } from './character-request-utils.js';
 
 /**
  * @typedef {(command: import('../../context/types.js').TauriInvokeCommand, args?: any) => Promise<any>} SafeInvokeFn
- * @typedef {(command: import('../../context/types.js').TauriInvokeCommand) => void} InvalidateInvokeAllFn
  * @typedef {(options?: { avatar?: any; fallbackName?: string }) => Promise<string | null>} ResolveCharacterIdFn
  * @typedef {(options?: { avatar?: any; fallbackName?: string }) => Promise<string | null>} ResolveExistingCharacterIdFn
  * @typedef {(file: Blob, options?: { preferredName?: string; preferredExtension?: string; kind?: string }) => Promise<MaterializedFileInfo | null>} MaterializeUploadFileFn
@@ -20,7 +19,6 @@ import { parseCropParam } from './character-request-utils.js';
 /**
  * @param {{
  *   safeInvoke: SafeInvokeFn;
- *   invalidateInvokeAll: InvalidateInvokeAllFn;
  *   resolveCharacterId: ResolveCharacterIdFn;
  *   resolveExistingCharacterId: ResolveExistingCharacterIdFn;
  *   materializeUploadFile: MaterializeUploadFileFn;
@@ -28,7 +26,6 @@ import { parseCropParam } from './character-request-utils.js';
  */
 export function createCharacterFormService({
     safeInvoke,
-    invalidateInvokeAll,
     resolveCharacterId,
     resolveExistingCharacterId,
     materializeUploadFile,
@@ -61,7 +58,7 @@ export function createCharacterFormService({
     /** @param {FormData} formData */
     function buildCharacterCardFromForm(formData) {
         const dto = formDataToCreateCharacterDto(formData);
-        const baseCard = parseJsonObjectStrict(stringFromForm(formData, 'json_data', ''), {}, "character json_data");
+        const baseCard = JSON.parse(dto.json_data || '{}');
         const name = dto.name.trim();
 
         if (!name) {
@@ -105,10 +102,6 @@ export function createCharacterFormService({
             'data.alternate_greetings': dto.alternate_greetings,
             'data.extensions': mergedExtensions,
         });
-
-        if (typeof mergedExtensions.world === 'string' && mergedExtensions.world !== '') {
-            unsetByPath(baseCard, 'data.character_book');
-        }
 
         if (formData.has('chat')) {
             if (chat) {
@@ -163,10 +156,9 @@ export function createCharacterFormService({
                         card_json: JSON.stringify(card),
                         avatar_path: fileInfo.filePath,
                         crop: crop || null,
+                        materialize_primary_lorebook: true,
                     },
                 });
-
-                invalidateInvokeAll('read_thumbnail_asset');
             } finally {
                 await fileInfo.cleanup?.();
             }
@@ -180,6 +172,7 @@ export function createCharacterFormService({
                 card_json: JSON.stringify(card),
                 avatar_path: null,
                 crop: crop || null,
+                materialize_primary_lorebook: true,
             },
         });
     }
@@ -216,7 +209,6 @@ export function createCharacterFormService({
                     crop: crop || null,
                 },
             });
-            invalidateInvokeAll('read_thumbnail_asset');
         } finally {
             await fileInfo.cleanup?.();
         }
@@ -249,7 +241,6 @@ export function createCharacterFormService({
                 overwrite_name: overwriteName,
                 crop: crop ? JSON.stringify(crop) : null,
             });
-            invalidateInvokeAll('read_thumbnail_asset');
             return uploaded;
         } finally {
             await fileInfo.cleanup?.();

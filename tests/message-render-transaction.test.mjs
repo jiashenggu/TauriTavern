@@ -23,27 +23,8 @@ function createFrontendPre(codeText, attrs = {}) {
     return pre;
 }
 
-test('replaceMesTextHtmlPreservingEmbeddedRuntimes fails fast on invalid DOM', async () => {
-    const dom = installFakeDom();
-    try {
-        const { replaceMesTextHtmlPreservingEmbeddedRuntimes } = await importFresh(
-            path.join(REPO_ROOT, 'src/tauri/main/adapters/embedded-runtime/message-render-transaction.js'),
-        );
 
-        assert.throws(
-            () => replaceMesTextHtmlPreservingEmbeddedRuntimes(null, '<div/>'),
-            /messageElement must be an HTMLElement/,
-        );
 
-        const message = document.createElement('div');
-        assert.throws(
-            () => replaceMesTextHtmlPreservingEmbeddedRuntimes(message, '<div/>'),
-            /\.mes_text not found/,
-        );
-    } finally {
-        dom.cleanup();
-    }
-});
 
 test('render transaction preserves JS-Slash-Runner wrappers when frontend blocks are unchanged', async () => {
     const dom = installFakeDom();
@@ -81,6 +62,7 @@ test('render transaction preserves JS-Slash-Runner wrappers when frontend blocks
     }
 });
 
+
 test('render transaction preserves LittleWhiteBox wrappers and finalizes the new <pre>', async () => {
     const dom = installFakeDom();
     try {
@@ -96,7 +78,7 @@ test('render transaction preserves LittleWhiteBox wrappers and finalizes the new
         mesText.classList.add('mes_text');
         message.append(mesText);
 
-        const frontend = '<html><body>lwb</body></html>';
+        const frontend = '<style>.card{display:block}</style><div class="card">lwb</div>';
         const wrapper = document.createElement('div');
         wrapper.classList.add('xiaobaix-iframe-wrapper');
         wrapper.append(document.createElement('iframe'));
@@ -128,33 +110,31 @@ test('render transaction preserves LittleWhiteBox wrappers and finalizes the new
     }
 });
 
-test('render transaction falls back to raw innerHTML replacement when frontend blocks change', async () => {
+
+test('prepared content commits participant mutations and exact staged nodes once', async () => {
     const dom = installFakeDom();
     try {
-        const { replaceMesTextHtmlPreservingEmbeddedRuntimes } = await importFresh(
+        const { prepareMesTextHtmlPreservingEmbeddedRuntimes } = await importFresh(
             path.join(REPO_ROOT, 'src/tauri/main/adapters/embedded-runtime/message-render-transaction.js'),
         );
-
         const message = document.createElement('div');
         message.classList.add('mes');
-        document.body.append(message);
-
         const mesText = document.createElement('div');
         mesText.classList.add('mes_text');
         message.append(mesText);
 
-        const wrapper = document.createElement('div');
-        wrapper.classList.add('TH-render');
-        wrapper.append(document.createElement('iframe'));
-        wrapper.append(createFrontendPre('<html><body>before</body></html>'));
-        mesText.append(wrapper);
+        const transaction = prepareMesTextHtmlPreservingEmbeddedRuntimes(
+            message,
+            '<pre><code>next</code></pre>',
+        );
+        transaction.content.setAttribute('data-participant-prepared', 'true');
+        const stagedPre = transaction.content.querySelector('pre');
+        transaction.commit();
 
-        replaceMesTextHtmlPreservingEmbeddedRuntimes(message, '<pre><code>&lt;html&gt;after&lt;/html&gt;</code></pre>');
-
-        assert.equal(mesText.querySelector('.TH-render'), null);
-        assert.equal(wrapper.isConnected, false);
+        assert.equal(mesText.getAttribute('data-participant-prepared'), 'true');
+        assert.equal(mesText.querySelector('pre'), stagedPre);
+        assert.throws(() => transaction.commit(), /already committed/);
     } finally {
         dom.cleanup();
     }
 });
-

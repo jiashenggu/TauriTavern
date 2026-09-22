@@ -1,0 +1,475 @@
+use chrono::{SecondsFormat, TimeZone, Utc};
+use serde::{Deserialize, Serialize};
+use tt_domain::models::character::{Character, CharacterExtensions};
+use tt_ports::repositories::character_repository::{
+    CharacterChat, CharacterCreateResult, CharacterCreateWarning, ImageCrop,
+};
+
+/// Character response DTO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CharacterDto {
+    pub shallow: bool,
+    pub name: String,
+    pub description: String,
+    pub personality: String,
+    pub scenario: String,
+    pub first_mes: String,
+    pub mes_example: String,
+    pub avatar: String,
+    pub chat: String,
+    pub creator: String,
+    pub creator_notes: String,
+    pub character_version: String,
+    pub tags: Vec<String>,
+    pub create_date: String,
+    pub talkativeness: f64,
+    pub fav: bool,
+    pub chat_size: u64,
+    pub data_size: u64,
+    pub date_added: i64,
+    pub date_last_chat: i64,
+    pub alternate_greetings: Vec<String>,
+    pub system_prompt: String,
+    pub post_history_instructions: String,
+    pub extensions: Option<serde_json::Value>,
+    pub character_book: Option<serde_json::Value>,
+    pub json_data: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CharacterCreateWarningDto {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCharacterWithAvatarResultDto {
+    pub character: CharacterDto,
+    pub warnings: Vec<CharacterCreateWarningDto>,
+}
+
+fn format_timestamp_millis(timestamp_millis: i64) -> Option<String> {
+    Utc.timestamp_millis_opt(timestamp_millis)
+        .single()
+        .map(|dt| dt.to_rfc3339_opts(SecondsFormat::Millis, true))
+}
+
+impl From<CharacterCreateWarning> for CharacterCreateWarningDto {
+    fn from(warning: CharacterCreateWarning) -> Self {
+        Self {
+            code: warning.code,
+            message: warning.message,
+        }
+    }
+}
+
+impl From<CharacterCreateResult> for CreateCharacterWithAvatarResultDto {
+    fn from(result: CharacterCreateResult) -> Self {
+        Self {
+            character: CharacterDto::from(result.character),
+            warnings: result.warnings.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// Character creation DTO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCharacterDto {
+    pub file_name: Option<String>,
+    pub json_data: Option<String>,
+    pub primary_lorebook: Option<String>,
+    pub name: String,
+    pub description: String,
+    pub personality: String,
+    pub scenario: String,
+    pub first_mes: String,
+    pub mes_example: String,
+    pub creator: Option<String>,
+    pub creator_notes: Option<String>,
+    pub character_version: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub talkativeness: Option<f64>,
+    pub fav: Option<bool>,
+    pub alternate_greetings: Option<Vec<String>>,
+    pub system_prompt: Option<String>,
+    pub post_history_instructions: Option<String>,
+    pub extensions: Option<serde_json::Value>,
+}
+
+/// Character update DTO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateCharacterDto {
+    pub name: Option<String>,
+    pub chat: Option<String>,
+    pub description: Option<String>,
+    pub personality: Option<String>,
+    pub scenario: Option<String>,
+    pub first_mes: Option<String>,
+    pub mes_example: Option<String>,
+    pub creator: Option<String>,
+    pub creator_notes: Option<String>,
+    pub character_version: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub talkativeness: Option<f64>,
+    pub fav: Option<bool>,
+    pub alternate_greetings: Option<Vec<String>>,
+    pub system_prompt: Option<String>,
+    pub post_history_instructions: Option<String>,
+    pub extensions: Option<serde_json::Value>,
+}
+
+/// Raw character card update DTO used by upstream-compatible HTTP routes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateCharacterCardDataDto {
+    pub card_json: String,
+    pub avatar_path: Option<String>,
+    pub crop: Option<ImageCropDto>,
+    #[serde(default)]
+    pub materialize_primary_lorebook: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckCharacterLorebookConflictDto {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CharacterLorebookConflictDto {
+    pub conflict: bool,
+    pub world: String,
+    pub embedded_name: Option<String>,
+    pub current_available: bool,
+    pub conflict_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CharacterLorebookConflictResolution {
+    Current,
+    Embedded,
+    Copy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveCharacterLorebookConflictDto {
+    pub name: String,
+    pub resolution: CharacterLorebookConflictResolution,
+    pub conflict_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveCharacterLorebookConflictResultDto {
+    pub world: String,
+    pub affected_world: Option<String>,
+    pub world_written: bool,
+}
+
+/// Raw character card merge DTO used by upstream-compatible HTTP routes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeCharacterCardDataDto {
+    pub update: serde_json::Value,
+}
+
+/// Bulk character card merge filter DTO used by upstream-compatible HTTP routes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkMergeCharacterCardDataFilterDto {
+    pub path: String,
+}
+
+/// Bulk character card merge DTO used by upstream-compatible HTTP routes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkMergeCharacterCardDataDto {
+    #[serde(default)]
+    pub avatars: Vec<String>,
+    pub data: serde_json::Value,
+    pub filter: Option<BulkMergeCharacterCardDataFilterDto>,
+}
+
+/// Bulk character card merge result DTO.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BulkMergeCharacterCardDataResultDto {
+    pub updated: Vec<String>,
+    pub skipped: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+/// Character rename DTO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameCharacterDto {
+    pub old_name: String,
+    pub new_name: String,
+}
+
+/// Character duplicate DTO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateCharacterDto {
+    pub name: String,
+}
+
+/// Character import DTO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportCharacterDto {
+    pub file_path: String,
+    pub preserve_file_name: Option<String>,
+}
+
+/// Existing character replacement DTO. `name` is the exact storage stem.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplaceCharacterDto {
+    pub file_path: String,
+    pub name: String,
+}
+
+/// Character export DTO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportCharacterDto {
+    pub name: String,
+    pub target_path: String,
+}
+
+/// Character export content DTO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportCharacterContentDto {
+    pub name: String,
+    pub format: String,
+}
+
+/// Character export content response DTO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportCharacterContentResultDto {
+    pub data: Vec<u8>,
+    pub mime_type: String,
+}
+
+/// Character avatar update DTO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateAvatarDto {
+    pub name: String,
+    pub avatar_path: String,
+    pub crop: Option<ImageCropDto>,
+}
+
+/// Character creation with avatar DTO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateWithAvatarDto {
+    pub character: CreateCharacterDto,
+    pub avatar_path: Option<String>,
+    pub crop: Option<ImageCropDto>,
+}
+
+/// Image crop DTO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageCropDto {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub want_resize: bool,
+}
+
+/// Character chat DTO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CharacterChatDto {
+    pub file_name: String,
+    pub file_size: String,
+    pub chat_items: usize,
+    pub last_message: String,
+    pub last_message_date: i64,
+}
+
+/// Character delete DTO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteCharacterDto {
+    pub name: String,
+    pub delete_chats: bool,
+}
+
+/// Character chats request DTO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetCharacterChatsDto {
+    pub name: String,
+    pub simple: bool,
+}
+
+/// Convert from domain model to DTO
+impl From<Character> for CharacterDto {
+    fn from(character: Character) -> Self {
+        let Character {
+            shallow,
+            name,
+            description,
+            personality,
+            scenario,
+            first_mes,
+            mes_example,
+            avatar,
+            chat,
+            creator,
+            creator_notes,
+            character_version,
+            tags,
+            create_date,
+            talkativeness,
+            fav,
+            chat_size,
+            data_size,
+            date_added,
+            date_last_chat,
+            json_data,
+            data,
+            ..
+        } = character;
+
+        let create_date = if create_date.trim().is_empty() && date_added > 0 {
+            format_timestamp_millis(date_added).unwrap_or(create_date)
+        } else {
+            create_date
+        };
+
+        let extensions = if shallow {
+            Some(serde_json::json!({
+                "talkativeness": data.extensions.talkativeness(),
+                "fav": data.extensions.fav(),
+                "world": data.extensions.world(),
+            }))
+        } else {
+            Some(
+                serde_json::to_value(&data.extensions)
+                    .expect("CharacterExtensions serialization should not fail"),
+            )
+        };
+
+        Self {
+            shallow,
+            name,
+            description,
+            personality,
+            scenario,
+            first_mes,
+            mes_example,
+            avatar,
+            chat,
+            creator,
+            creator_notes,
+            character_version,
+            tags,
+            create_date,
+            talkativeness,
+            fav,
+            chat_size,
+            data_size,
+            date_added,
+            date_last_chat,
+            alternate_greetings: data.alternate_greetings,
+            system_prompt: data.system_prompt,
+            post_history_instructions: data.post_history_instructions,
+            extensions,
+            character_book: data.character_book,
+            json_data,
+        }
+    }
+}
+
+/// Convert from DTO to domain model
+impl TryFrom<CreateCharacterDto> for Character {
+    type Error = serde_json::Error;
+
+    fn try_from(dto: CreateCharacterDto) -> Result<Self, Self::Error> {
+        let file_name = dto
+            .file_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.strip_suffix(".png").unwrap_or(value).to_string());
+        let mut character =
+            Character::new(dto.name, dto.description, dto.personality, dto.first_mes);
+        character.file_name = file_name;
+        character.json_data = dto.json_data;
+
+        character.scenario = dto.scenario;
+        character.mes_example = dto.mes_example;
+        character.creator = dto.creator.unwrap_or_default();
+        character.creator_notes = dto.creator_notes.unwrap_or_default();
+        character.character_version = dto.character_version.unwrap_or_default();
+        character.tags = dto.tags.unwrap_or_default();
+        character.talkativeness = dto.talkativeness.unwrap_or(0.5);
+        character.fav = dto.fav.unwrap_or(false);
+
+        // Update data fields
+        character.data.scenario = character.scenario.clone();
+        character.data.mes_example = character.mes_example.clone();
+        character.data.creator = character.creator.clone();
+        character.data.creator_notes = character.creator_notes.clone();
+        character.data.character_version = character.character_version.clone();
+        character.data.tags = character.tags.clone();
+        character.data.alternate_greetings = dto.alternate_greetings.unwrap_or_default();
+        character.data.system_prompt = dto.system_prompt.unwrap_or_default();
+        character.data.post_history_instructions =
+            dto.post_history_instructions.unwrap_or_default();
+        if let Some(extensions) = dto.extensions {
+            character.data.extensions = serde_json::from_value::<CharacterExtensions>(extensions)?;
+        }
+        character
+            .data
+            .extensions
+            .set_talkativeness(character.talkativeness);
+        character.data.extensions.set_fav(character.fav);
+
+        Ok(character)
+    }
+}
+
+/// Convert from domain model to DTO
+impl From<CharacterChat> for CharacterChatDto {
+    fn from(chat: CharacterChat) -> Self {
+        Self {
+            file_name: chat.file_name,
+            file_size: chat.file_size,
+            chat_items: chat.chat_items,
+            last_message: chat.last_message,
+            last_message_date: chat.last_message_date,
+        }
+    }
+}
+
+/// Convert from DTO to domain model
+impl From<ImageCropDto> for ImageCrop {
+    fn from(dto: ImageCropDto) -> Self {
+        Self {
+            x: dto.x,
+            y: dto.y,
+            width: dto.width,
+            height: dto.height,
+            want_resize: dto.want_resize,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CharacterDto;
+    use chrono::{SecondsFormat, TimeZone, Utc};
+    use tt_domain::models::character::Character;
+
+    #[test]
+    fn character_dto_falls_back_to_date_added_when_create_date_missing() {
+        let mut character = Character::new(
+            "Fallback".to_string(),
+            "desc".to_string(),
+            "persona".to_string(),
+            "hi".to_string(),
+        );
+
+        character.create_date = "".to_string();
+        character.date_added = 1_700_000_000_123;
+
+        let dto = CharacterDto::from(character);
+        let expected = Utc
+            .timestamp_millis_opt(1_700_000_000_123)
+            .single()
+            .expect("valid timestamp")
+            .to_rfc3339_opts(SecondsFormat::Millis, true);
+
+        assert_eq!(dto.create_date, expected);
+    }
+}

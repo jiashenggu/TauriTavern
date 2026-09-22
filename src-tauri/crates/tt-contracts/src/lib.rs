@@ -1,0 +1,12 @@
+pub mod agent_profile_storage;
+pub mod character;
+pub mod chat;
+pub mod client_asset_paths;
+pub mod database;
+pub mod host;
+pub mod lan_discovery;
+pub mod observability;
+pub mod provider_metadata;
+pub mod range;
+pub mod sync;
+pub mod sync_automation;

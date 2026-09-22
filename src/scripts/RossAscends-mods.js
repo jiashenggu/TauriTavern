@@ -4,6 +4,7 @@ import { installChatInputFullscreenEditor } from './chat-input-fullscreen-editor
 
 import {
     characters,
+    animateChatScrollTop,
     online_status,
     main_api,
     isConnectionValidationSuspended,
@@ -23,6 +24,13 @@ import {
     sendTextareaMessage,
     doNavbarIconClick,
     isSwipingAllowed,
+    setChatScrollTop,
+    getChatScrollHeight,
+    getChatScrollTop,
+    offsetChatScrollTop,
+    chat_metadata,
+    isBoundedChatSurfaceView,
+    jumpBoundedChatSurfaceToMessage,
 } from '../script.js';
 
 import {
@@ -37,7 +45,7 @@ import {
     secret_state,
 } from './secrets.js';
 import { debounce, getStringHash, isValidUrl } from './utils.js';
-import { chat_completion_sources, oai_settings } from './openai.js';
+import { chat_completion_sources, oai_settings, POLLINATIONS_ENDPOINT } from './openai.js';
 import { getTokenCountAsync } from './tokenizers.js';
 import { textgen_types, textgenerationwebui_settings as textgen_settings, getTextGenServer } from './textgen-settings.js';
 import { debounce_timeout, SWIPE_SOURCE } from './constants.js';
@@ -268,13 +276,16 @@ export async function RA_CountCharTokens() {
 }
 /**
  * Auto load chat with the last active character or group.
- * Fires when active_character is defined and auto_load_chat is true.
+ * Starts after extension discovery so known renderer delegation intent is available before chat materialization.
  * The function first tries to find a character with a specific ID from the global settings.
  * If it doesn't exist, it tries to find a group with a specific grid from the global settings.
- * If the character list hadn't been loaded yet, it calls itself again after 100ms delay.
  * The character or group is selected (clicked) if it is found.
  */
-async function RA_autoloadchat() {
+export async function autoloadLastChat() {
+    if (!power_user.auto_load_chat) {
+        return;
+    }
+
     // active character is the name, we should look it up in the character list and get the id
     if (active_character !== null && active_character !== undefined) {
         const active_character_id = characters.findIndex(x => getTagKeyForEntity(x) === active_character);
@@ -394,6 +405,7 @@ function RA_autoconnect(PrevApi) {
                 break;
             case 'openai':
                 if (((secret_state[SECRET_KEYS.OPENAI] || oai_settings.reverse_proxy) && oai_settings.chat_completion_source == chat_completion_sources.OPENAI)
+                    || (secret_state[SECRET_KEYS.OPENCODE] && oai_settings.chat_completion_source == chat_completion_sources.OPENCODE)
                     || ((secret_state[SECRET_KEYS.CLAUDE] || oai_settings.reverse_proxy) && oai_settings.chat_completion_source == chat_completion_sources.CLAUDE)
                     || (secret_state[SECRET_KEYS.OPENROUTER] && oai_settings.chat_completion_source == chat_completion_sources.OPENROUTER)
                     || (secret_state[SECRET_KEYS.AI21] && oai_settings.chat_completion_source == chat_completion_sources.AI21)
@@ -415,7 +427,7 @@ function RA_autoconnect(PrevApi) {
                     || (secret_state[SECRET_KEYS.FIREWORKS] && oai_settings.chat_completion_source == chat_completion_sources.FIREWORKS)
                     || (secret_state[SECRET_KEYS.COMETAPI] && oai_settings.chat_completion_source == chat_completion_sources.COMETAPI)
                     || (secret_state[SECRET_KEYS.ZAI] && oai_settings.chat_completion_source == chat_completion_sources.ZAI)
-                    || (secret_state[SECRET_KEYS.POLLINATIONS] && oai_settings.chat_completion_source === chat_completion_sources.POLLINATIONS)
+                    || ((secret_state[SECRET_KEYS.POLLINATIONS] || oai_settings.pollinations_endpoint === POLLINATIONS_ENDPOINT.ANONYMOUS) && oai_settings.chat_completion_source === chat_completion_sources.POLLINATIONS)
                     || (secret_state[SECRET_KEYS.WORKERS_AI] && oai_settings.chat_completion_source == chat_completion_sources.WORKERS_AI)
                     || (secret_state[SECRET_KEYS.MINIMAX] && oai_settings.chat_completion_source == chat_completion_sources.MINIMAX)
                     || (secret_state[SECRET_KEYS.AWS_BEDROCK] && oai_settings.chat_completion_source == chat_completion_sources.AWS_BEDROCK)
@@ -693,7 +705,7 @@ function autoFitSendTextArea() {
     sendTextArea.style.height = `${newHeight}px`;
 
     if (!isFirefox) {
-        chatBlock.scrollTop = chatBlock.scrollHeight - (chatBlock.offsetHeight + originalScrollBottom);
+        setChatScrollTop(chatBlock.scrollHeight - (chatBlock.offsetHeight + originalScrollBottom));
     }
 }
 export const autoFitSendTextAreaDebounced = debounce(autoFitSendTextArea, debounce_timeout.short);
@@ -703,10 +715,6 @@ export const autoFitSendTextAreaDebounced = debounce(autoFitSendTextArea, deboun
 export function initRossMods() {
     // initial status check
     checkStatusDebounced();
-
-    if (power_user.auto_load_chat) {
-        RA_autoloadchat();
-    }
 
     if (power_user.auto_connect) {
         RA_autoconnect();
@@ -853,16 +861,7 @@ export function initRossMods() {
     $(SelectedCharacterTab).on('click', function () { accountStorage.setItem('SelectedNavTab', 'rm_button_selected_ch'); });
     $('#rm_button_characters').on('click', function () { accountStorage.setItem('SelectedNavTab', 'rm_button_characters'); });
 
-    // when a char is selected from the list, save them as the auto-load character for next page load
-
-    // when a char is selected from the list, save their name as the auto-load character for next page load
-    $(document).on('click', '.character_select', function () {
-        const characterId = $(this).attr('data-chid');
-        setActiveCharacter(characterId);
-        setActiveGroup(null);
-        saveSettingsDebounced();
-    });
-
+    // Save the selected group for the next page load.
     $(document).on('click', '.group_select', function () {
         const groupId = $(this).attr('data-chid') || $(this).attr('data-grid');
         setActiveCharacter(null);
@@ -886,7 +885,7 @@ export function initRossMods() {
                 const isScrollAtBottom = Math.abs(chatBlock.scrollHeight - chatBlock.scrollTop - newHeight) <= threshold;
 
                 if (!isScrollAtBottom && Math.abs(deltaHeight) > threshold) {
-                    chatBlock.scrollTop -= deltaHeight;
+                    offsetChatScrollTop(-deltaHeight);
                 }
                 lastHeight = newHeight;
             }
@@ -1011,10 +1010,16 @@ export function initRossMods() {
             return;
         }
 
+        // Some WebKit versions dispatch the IME commit keydown after compositionend,
+        // so isComposing is false; keyCode 229 is the legacy IME-processed marker.
+        if (event.isComposing || event.keyCode === 229) {
+            return;
+        }
+
         //Enter to send when send_textarea in focus
         if (document.activeElement == hotkeyTargets.send_textarea) {
             const sendOnEnter = shouldSendOnEnter();
-            if (!event.isComposing && !event.shiftKey && !event.ctrlKey && !event.altKey && event.key == 'Enter' && sendOnEnter) {
+            if (!event.shiftKey && !event.ctrlKey && !event.altKey && event.key == 'Enter' && sendOnEnter) {
                 event.preventDefault();
                 sendTextareaMessage();
                 return;
@@ -1030,20 +1035,23 @@ export function initRossMods() {
         //ctrl+shift+up to scroll to context line
         if (event.shiftKey && event.ctrlKey && event.key == 'ArrowUp') {
             event.preventDefault();
+            if (isBoundedChatSurfaceView() && Number.isInteger(chat_metadata.lastInContextMessageId)) {
+                jumpBoundedChatSurfaceToMessage(chat_metadata.lastInContextMessageId);
+                return;
+            }
             let contextLine = $('.lastInContext');
             if (contextLine.length !== 0) {
-                $('#chat').animate({
-                    scrollTop: contextLine.offset().top - $('#chat').offset().top + $('#chat').scrollTop(),
-                }, 300);
+                animateChatScrollTop(
+                    contextLine.offset().top - $('#chat').offset().top + getChatScrollTop(),
+                    300,
+                );
             } else { toastr.warning('Context line not found, send a message first!'); }
             return;
         }
         //ctrl+shift+down to scroll to bottom of chat
         if (event.shiftKey && event.ctrlKey && event.key == 'ArrowDown') {
             event.preventDefault();
-            $('#chat').animate({
-                scrollTop: $('#chat').prop('scrollHeight'),
-            }, 300);
+            animateChatScrollTop(getChatScrollHeight(), 300);
             return;
         }
         //ctrl+shift+home to scroll to the start of the latest AI response

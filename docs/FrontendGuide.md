@@ -1,6 +1,6 @@
 # TauriTavern 前端指南
 
-本文档描述 TauriTavern 当前前端（基于 SillyTavern 1.16.0）在 Tauri 环境下的集成架构与开发方式。
+本文档描述 TauriTavern 当前前端（基于 SillyTavern 1.18.0）在 Tauri 环境下的集成架构与开发方式。
 
 宿主层对外契约清单见：`docs/FrontendHostContract.md`（重构时优先保障其不回归）。
 
@@ -16,7 +16,7 @@
 当前前端启动顺序如下：
 
 1. `src/init.js` 动态导入：`lib.js` -> `tauri-main.js` -> `script.js`
-2. `src/lib.js` 静态导入 `src/dist/lib.core.bundle.js`，统一提供 ESM 导出；重/可选库通过 `getHljs()/getReadability()` 动态加载 `src/dist/lib.optional.bundle.js`
+2. `src/lib.js` 静态导入 `src/dist/lib.core.bundle.js`，统一提供 ESM 导出；`highlight.js` 通过 `getHljs()` 按需加载
 3. `src/tauri-main.js` 仅调用 `bootstrapTauriMain()`（薄入口）
 4. `src/tauri/main/bootstrap.js` 负责：
    - 创建运行上下文（`context`）
@@ -78,7 +78,7 @@ src/
 
 #### 4.2.1 `window.__TAURITAVERN__.api.chat`（扩展/记忆类插件 API）
 
-> 这是 TauriTavern 独有 API 的**唯一入口**（刻意不做 alias），用于在 windowed payload 模式下仍然给扩展提供稳定、可维护的“历史/定位/检索/持久化”能力。
+> 这是 TauriTavern 独有 API 的**唯一入口**（刻意不做 alias），为扩展提供有界历史读取、后端定位、检索与持久化能力；它增强上游完整 `chat[]` 契约，不替代该契约。
 
 - 安装位置：`src/tauri/main/api/chat.js`（在 `src/tauri/main/bootstrap.js` 中安装到 `window.__TAURITAVERN__.api.chat`）。
 - 类型声明：`src/types.d.ts`（便于扩展作者用 TS/JSDoc 一键上手）。
@@ -124,20 +124,58 @@ src/
 | `resource-routes.js` | 头像、背景、主题、群组等资源接口 |
 | `character-routes.js` | 角色列表、创建、编辑、导入导出、重命名 |
 | `chat-routes.js` | 聊天读写、搜索、最近记录、导出 |
-| `ai-routes.js` | Chat Completion（OpenAI / Claude / Gemini(MakerSuite)）与 tokenizer（count/encode/decode/bias） |
+| `ai-routes.js` | Chat Completion（OpenAI / Claude / Gemini / OpenCode） |
+| `tokenizer-routes.js` | tokenizer count/encode/decode/bias 与上游本地 tokenizer 兼容路由 |
 
-## 6.1 聊天分段加载（Windowed Loading，Phase 2-C）
+## 6.1 聊天 payload 与 DOM 边界
 
-- 只在 Tauri 环境启用：以 `isTauriChatPayloadTransportEnabled()` 为准。
 - 上游接管点：`src/script.js`（character chat）与 `src/scripts/group-chats.js`（group chat）。
-- 统一入口：上游只 import `src/scripts/chat-payload-transport.js`（不要直接依赖 `src/scripts/tauri/chat/*`）。
-- window state：`src/scripts/tauri/chat/windowed-state.js`
-  - 桌面：`DEFAULT_CHAT_WINDOW_LINES_DESKTOP = 100`
-  - 移动端（Android/iOS runtime）：`DEFAULT_CHAT_WINDOW_LINES_MOBILE = 50`
-- 初次加载：`load*PayloadTail({ maxLines }) -> { payload, cursor, hasMoreBefore }`。
-- 翻页：`load*PayloadBefore({ cursor, maxLines }) -> { messages, cursor, hasMoreBefore }`；prepend 后必须 `updateViewMessageIds(0)`。
-- 保存：`save*PayloadWindowed({ cursor, payload }) -> cursor` 并回写 window state；保存前不要落盘 `chat_metadata.lastInContextMessageId`。
-- 错误策略：cursor 签名/边界失效直接抛错；不要写“静默回退到全量加载/全量保存”的 fallback。
+- 统一入口：上游只 import `src/scripts/chat-payload-transport.js`，不要直接依赖 `src/scripts/tauri/chat/*`。
+- 第一方当前聊天通过 `src/scripts/chat-payload-transport.js` 加载全部楼层，可选[历史滑动按需加载](CurrentState/ChatPayload.md#21-历史滑动按需加载)；`/api/chats/get` 与 `/api/chats/group/get` 保留为扩展和脚本的兼容路由。header 与完整、有序的消息数组分离后，generation、扩展和保存共享同一个 canonical `chat[]`。
+- `chat_truncation` 只限制初始 DOM。Show More 从完整 `chat[]` 补挂楼层，不发起分页 I/O，不改变消息绝对索引。
+- 第一方完整保存通过统一 transport 直连；`/api/chats/save` 与 `/api/chats/group/save` 保留为扩展兼容路由。当前聊天业务入口仍经 `enqueueChatSave()`，transport 自身不重复入队。落盘的 header metadata 统一取自 `persistedChatMetadata()`，它去掉 `chat_metadata.lastInContextMessageId`；不要另行拼装。
+- commit 在首次异步让出前捕获逐记录 JSON 文本快照，再经 target-local commit session 编码、分帧和原子发布；保存期间的消息修改不混入本次提交。integrity 错误按明确的 `code` 处理，不按错误文案猜测。
+- `saveMetadata()` 只保存 header 的 `chat_metadata`，通过同一 transport facade 发送独立 JSON 快照，不遍历或传输消息。它仍经当前聊天保存队列，但不取消挂起的完整保存、不保存消息派生缓存。角色与群聊、完整与 metadata 四种当前聊天写入共用 `runChatSave()` 的失败策略：integrity 弹窗与强制完整保存恢复都留在同一次队列任务中，其他失败提示并抛出。
+- 新群聊在问候扩展事件前绑定 metadata 并落盘初始 header，保证 metadata 保存的文件存在前提；后续初始化不得覆盖事件修改。修改消息的扩展需显式调用完整保存。
+- tail/before/beforePages 只属于 `api.chat.history` 与 Agent 的显式只读查询，不参与前端当前聊天状态。
+- 合法 JSONL 任一记录解析失败时整体加载失败；不得提交部分历史或静默降级。
+
+完整现状见 `docs/CurrentState/ChatPayload.md`。
+
+## 6.2 ChatSurface 所有权与 participant
+
+- `chat[]` 仍是完整、唯一的数据事实源；ChatSurface 只拥有 `#chat > .mes` 的当前视图投影。
+- `installChatSurfaceRuntime()` 是 `script.js` 唯一的 concrete composition seam；结构/投影位于 kernel，生命周期协调位于 services，真实 DOM/scroll 写入位于 adapters。
+- 外部 renderer 通过 `window.__TAURITAVERN__.api.chatSurface.registerParticipant()` 接入，不直接控制投影，也不依赖伪造消息事件。
+- 异步模板通过独立的 `registerContentProcessor()` 准备显示 HTML；`content-preparation.js` 保存消息内容结果，滚动重挂载不重复求值。manifest `hooks.chatSurface` 在首次投影前完成注册，内容结果通过既有同步事务交给 participant。
+- 最终内容统一通过 `getMessageTextHTML()` 格式化；核心调用 `finalizeMessageContent(messageId, event?, ...args)` 完成内容提交后再发送相应消息事件。刷新只替换内容，控制器的 `commitContent()` 只提交已准备内容，不回到预处理入口。
+- renderer 在入口只调用一次 `isManagedOwnershipRequired()`：`true` 时只启用 participant owner，`false` 时只启用原 static owner；API 是否存在和当前 DOM 形状都不能替代该决策。
+- 结构 reconcile 与纯 range projection 分离：前者只在 canonical `chat[]` 结构改变时 O(N) 执行，后者携带 epoch/revision token 并保持 O(M)。
+- mount lease 与 content lease 分离；streaming 中间帧只提交内容，最终帧才恢复 decorator/runtime。
+- `chat_virtualization_enabled=false` 是默认值并保持上游 Show More 语义；TauriTavern Settings 的“聊天 DOM 虚拟化”开关直接绑定这个布尔值并在保存后 reload。用户显式开启后，experimental bounded 使用 TanStack 几何提交 `V ∪ T`，true tail 常驻且 `.mes` 上界为 `32 + 1`。
+- TanStack symbols 由 `lib.js` vendor facade 在 composition root 注入单一 adapter；原生 ESM 源码不直接解析 bare package。virtualizer 的 `scrollToFn` 也注入既有 ChatScrollAdapter，因此 `#chat` 的物理滚动写入仍只有一个 owner。
+- bounded 的 runtime candidate 由独立 grant lease 管理；viewport 滚动可以 revoke/re-grant，而不会伪造 content commit 或消息业务事件。
+- runtime demand 只按 visible 与 overscan 排序；常驻 true tail 不额外预留 runtime 名额。真实全局 reflow 会保持独立 follow-tail 意图，或以稳定消息 key + clamp 后的楼内 offset 恢复锚点；普通 settings save 与 IME height-only resize 不再清空全部历史测量。
+- 可由 `chat[mesid]` 推导的楼层状态由 materializer 负责；bounded DOM commit 后，私有 `syncMountedChatViewState()` 在最终测量前幂等重放 swipe/delete 等临时核心 UI。该 seam 不发送 SillyTavern 业务事件。
+- 旧扩展直接删除消息 root 时，兼容桥只负责释放相应 root 的 lease；它不会接管第三方的内容写入或重编号。bounded policy 必须先通过 participant capability gate。
+- Project raw API 见 `docs/API/ChatSurface.md`。
+
+## 6.3 Theme 作用域与所有权
+
+- `power_user.theme` 始终表示当前实际生效的命名 Theme；主题 CRUD、斜杠命令与扩展上下文继续遵循这一上游语义。
+- `power_user.theme_fallback` 保存无局部绑定时的全局 Theme；系统动态主题只更新该 fallback，不覆盖当前聊天、角色或群组绑定。
+- Theme 解析顺序固定为 `chat_metadata.theme -> character/group binding -> theme_fallback`。角色绑定以未经转换的 avatar filename 为键，群组绑定以 group id 为键。
+- Theme 文件只保存可移植的外观快照，不包含本机角色或聊天身份。聊天绑定随 JSONL header metadata 持久化；角色与群组绑定随 settings 持久化。
+- 所有生效切换必须经 `src/scripts/power-user.js` 的统一入口；Tauri appearance adapter 不模拟 `#themes` 的 DOM change 事件。
+
+## 6.4 Chat Completion 参数管理
+
+实现位于 `src/scripts/tauri/generation-params/`，在 `APP_READY` 后导入并挂载。参数发现、渠道支持与值的读写沿用上游设置和控件。
+
+- 移除请求参数表示本次生成不启用该参数，保留原值；移除开关表示关闭；隐藏本地区块不改变其内容或行为。旧预设缺少 Fast Mode 字段时明确关闭。
+- 请求参数的移除状态保存在预设 `extensions.tauritavern.omit_params`，本地区块显隐仅保存在设备上。旧预设保持原行为，移除范围限于可选参数，不能删除 `messages`、`model` 等结构字段。
+- Prompt 组装和生成判断使用本次生效设置，`createGenerationParameters()` 出口统一省略字段；用户显式配置的 Additional Parameters 仍拥有最终覆盖权。
+- JSON 视图只编辑当前格式可用的参数，非法输入整体不应用；它不是最终请求预览，后续仍遵循渠道与模型的转换规则。
 
 ## 7. 插件系统前端适配
 
@@ -176,13 +214,28 @@ src/
 - `src/scripts/extensions/runtime/third-party-runtime.js` 不再承担 JS 源码重写或伪服务器职责，主要只保留第三方样式兼容修复。
 - 面向持续开发的现状说明见 `docs/CurrentState/ThirdPartyExtensions.md`；涉及实现边界或改动前，先读该文档，再决定是改前端 runtime 还是改后端资源端点。
 
+### 7.3.2 First-party React extension
+
+TauriTavern 自有的状态型 UI 作为 SillyTavern first-party extension 挂载 React client island。当前 Agent、MCP 与 Settings owned scope 均遵循这一基线：
+
+- manifest、locale 和 SmartTheme CSS 仍遵循现有扩展资源契约；不引入 Next.js、独立页面 shell 或第二套路由。
+- `src/index.tsx` 只负责等待 Host ABI、解析 concrete actions、创建 extension container 与 `createRoot()`。
+- React presentation 只接收 strict typed initial state、actions 与 translator；不得直接 `invoke()`、操作 jQuery 或读取 Rust command 名。
+- 跨窗口和长期数据继续由 Rust/Host service 拥有；局部 React state 只表示当前视图，不能成为平台事实源或持久 cache。
+- 样式必须使用 `--SmartTheme*`、字体、动画与边框变量，保留 SillyTavern vanilla 视觉和用户主题覆盖能力。
+- `tsconfig.ui.json`、React Hooks/TypeScript lint 与 Rstest/Testing Library 显式覆盖 Agent、MCP 和 `src/scripts/tauri/setting` 三个 owned scope；`pnpm check` 是统一验收入口。
+- production 与 development 共用 `createRspackConfigs(mode)`。标准 Tauri dev server 在首次 development 编译成功后才监听，并只在成功重编译后 reload。
+- `scripts/check-first-party-ui-guardrails.mjs` 为自有扩展架构限定为 React + Strict TypeScript。
+当前工程基线、冻结 handle 与 bundle 数据见 `docs/CurrentState/FirstPartyUI.md`。
+
 ### 7.4 契约与约束
 
 - third-party 扩展命名约定为 `third-party/<folder>`，前后端均按该约定解析。
 - 扩展命令参数统一使用 camelCase（如 `extensionName`），避免 invoke 参数缺失。
 - 客户端版本检查仍遵循上游格式：`SillyTavern:<version>:TauriTavern`，用于 `minimum_client_version` 判断。
 - 拦截器是否接管请求由 `router.canHandle(method, path)` 决定，不再维护分散的路径白名单。
-- `/api/extensions/branches` 与 `/api/extensions/switch` 在 Tauri 后端默认不支持（返回空列表/错误），新增分支能力需后端先实现。
+- `/api/extensions/branches` 返回远端 branch 的 `{ name, commit, current, label }`；`label` 当前有意为空，前端仅在非空时显示。
+- `/api/extensions/switch` 接受 branch 短名并在成功时返回空 `204`；现有 reload/settings 时序保持不变，不新增 switch hook或借机触发 update hook。
 
 ### 7.5 常见问题定位
 
@@ -206,7 +259,7 @@ src/
 
 - 实现位置：`src/tauri/main/compat/mobile/mobile-runtime-compat.js`。
 - 入口：`src/tauri/main/bootstrap.js` 中安装（仅 Tauri mobile）。
-- 行为：仅补齐缺失 API，且只执行一次。
+- 行为：基础 API 仅在缺失时补齐；Android 的 Web Clipboard 写入统一映射到原生写入器；整体只执行一次。
 - 当前按需补齐：
   - `Array.prototype.at`
   - `String.prototype.at`
@@ -215,8 +268,9 @@ src/
   - `Array.prototype.toSorted`
   - `Array.prototype.toReversed`
   - `Object.hasOwn`
+  - `navigator.clipboard.writeText`（仅 Android；保留 Clipboard 对象上的其他方法）
 
-该策略用于修复移动端第三方插件在初始化阶段出现的 `TypeError: *.at is not a function`。
+该策略用于修复移动端第三方插件在初始化阶段出现的 `TypeError: *.at is not a function`，以及 Android WebView 拒绝 Web Clipboard 写入的问题。TauriTavern 第一方代码在所有平台直接使用 `src/tauri-bridge.js` 的原生写入器；宿主只授予 `clipboard-manager:allow-write-text`，不授予剪贴板读取能力，也不需要申请操作系统运行时权限。
 
 #### 7.7.2 CSS `@layer` 降级（Android 旧 WebView）
 
@@ -253,6 +307,8 @@ src/
 
 - 若看到 `*.at is not a function`：
   - 检查是否为 Tauri mobile 会话，并确认 `window.__TAURITAVERN_MOBILE_RUNTIME_COMPAT__ === true`。
+- 若 Android 复制失败：
+  - 检查 `plugin:clipboard-manager|write_text` invoke 的拒绝原因；该链路不会静默回退到 Web Clipboard。
 - 若插件样式错乱但 CSS 已成功请求：
   - 优先检查是否命中 `@layer` 降级分支；
   - 关注 `resolveStylesheetUrl()` 是否返回带 `ttCompat=layer` 的 URL。
@@ -262,7 +318,9 @@ src/
 
 ### 7.8 嵌入式运行时（Embedded Runtime，消息内 iframe）
 
-目标：把“消息内嵌入式内容（iframe）”从普通 DOM 升级为**可管理运行时**（有预算、有 park/hydrate、有自愈），并且在消息重渲染时尽量避免 iframe teardown/白屏重载，保持对主流扩展生态（JSR/LWB）可迁移。
+> 架构状态：仅保留为 static compatibility。它不是 ChatSurface bounded 路线的 runtime owner；新虚拟化开发不得继续扩展 parking/ghost/slot 体系。
+
+该旧机制把消息内 iframe 包装成带预算、park/hydrate 与自愈的 slot，并在 static 消息重渲染时尽量避免 iframe teardown。bounded 启动会跳过该 chat owner；renderer 必须通过唯一 ChatSurface participant 接入，两套 owner 不得并存。
 
 当前落地点（代码）：
 
@@ -277,13 +335,14 @@ src/
   - 已支持：JS-Slash-Runner（`.TH-render`）与 LittleWhiteBox（`.xiaobaix-iframe-wrapper`）。
 - 消息写入 facade：`src/scripts/tauri/message/mes-text-write.js`
   - 上游调用点统一依赖 facade；`off` 时直接恢复普通 `.mes_text` HTML 写入语义。
-- 渲染事务（ER-3.0）：`src/tauri/main/adapters/embedded-runtime/message-render-transaction.js`
+- 渲染事务：`src/tauri/main/adapters/embedded-runtime/message-render-transaction.js`
   - 作为 facade 在 ER 开启时的底层实现，避免把 iframe runtime 当成普通 DOM 反复销毁重建。
 
 当前边界说明：
 
 - 已纳入管控：**消息内 iframe runtime**（JSR/LWB）。
 - 暂不纳入：面板类 runtime 的 park（目前依赖浏览器本身回收即可）。
+- 上述边界只描述 legacy profile 的当前事实，不是后续 bounded 架构的扩展清单。
 
 更多“当前如何工作/哪些契约不能破坏/回归点”见：`docs/CurrentState/EmbeddedRuntime.md`。
 
@@ -294,13 +353,13 @@ src/
 
 ## 9. 如何新增一个 Tauri 注入接口
 
-1. 在 Rust 后端新增/确认命令（`src-tauri/src/presentation/commands/*`）。
+1. 在 Rust 后端新增/确认命令（`src-tauri/crates/tauritavern/src/presentation/commands/*`）。
 2. 若宿主层会调用该命令，将命令名加入 `src/tauri/main/kernel/invokes/tauri-commands.js`（`TauriInvokeCommand`，避免字符串拼写漂移）。
 3. 若该命令为高频/可合并写入的调用，按需在 `src/tauri/main/kernel/invokes/invoke-policies.js` 增加/调整策略（dedupe / write-behind）。
 4. 在 `src/tauri/main/routes/` 对应业务域中新增路由：路由层禁止直接引用 `window`，需要浏览器能力时下沉到 `adapters/` 或 `services/`。
 5. 路由内只做参数校验、DTO 组装、`context.safeInvoke` 调用；错误直接暴露（避免 silent fallback）。
 6. 保持返回结构稳定（状态码 + JSON 结构），避免破坏上游前端调用假设。
-7. 跑 `pnpm run check`（guardrails + types），确保依赖边界与行数预算未回归。
+7. 跑 `pnpm run check`，确保完整工程门禁通过。
 
 ## 10. 调试与验证
 
@@ -331,14 +390,14 @@ src/
 - 常用导出命令：
   - `window.__TAURITAVERN_PERF__.downloadReport()` 下载 JSON（便于交给 AI 分析）
   - `window.__TAURITAVERN_PERF__.exportJson({ includeResources: true })` 直接拿到 JSON 字符串
-  - `await window.__TAURITAVERN_PERF__.copyReport()` 复制到剪贴板（若可用）
+  - `await window.__TAURITAVERN_PERF__.copyReport()` 通过原生写入器复制到剪贴板
 - HUD 操作：拖动标题栏移动（位置持久化），点击标题栏展开/收起；桌面端可用 `Ctrl+Alt+P` 切换开关。
 
 ## 11. 工程守护（Guardrails + 类型检查）
 
 目标：把宿主层（`src/tauri/main/*`）限制在**可长期维护**的规模与依赖形态，避免再次回到单文件膨胀与隐式耦合。
 
-- 一键检查：`pnpm run check`（= `check:frontend` + `check:types`）。
+- 一键检查：`pnpm run check`（宿主边界、类型、架构边界、全部测试与 Clippy）。
 - Guardrails（`scripts/check-frontend-guardrails.mjs`）：
   - 行数预算：默认单文件 `<= 500` 行；关键聚合文件受 `scripts/guardrails/frontend-lines-baseline.json` 的基线约束。
   - 依赖边界：`kernel/ports` 不得 import `services/routes/adapters`；`services` 不得 import `routes`。

@@ -16,6 +16,7 @@ import {
     systemUserName,
     this_chid,
     user_avatar,
+    withChatSurfaceStructureMutation,
 } from '../../../script.js';
 import {
     doExtrasFetch,
@@ -3073,22 +3074,11 @@ async function generatePicture(initiator, args, trigger, message, callback) {
     let loaderHandle = ActionLoaderHandle.EMPTY;
 
     try {
-        const combineNegatives = (prefix) => { negativePromptPrefix = combinePrefixes(negativePromptPrefix, prefix); };
-
-        // generate the text prompt for the image
-        let prompt = await getPrompt(generationType, message, trigger, quietPrompt, combineNegatives);
-        console.log('Processed image prompt:', prompt);
-
-        // Extension hook for prompt processing
-        const eventData = { prompt, generationType, message, trigger };
-        await eventSource.emit(event_types.SD_PROMPT_PROCESSING, eventData);
-        prompt = eventData.prompt; // Allow extensions to modify the prompt
-
         if (typeof args?._abortController?.addEventListener === 'function') {
             args._abortController.addEventListener('abort', stopListener);
         }
 
-        // Show non-blocking stoppable toast for this generation
+        // Show non-blocking stoppable toast for prompt and image generation
         loaderHandle = loader.show({
             blocking: false,
             slug: `${MODULE_NAME}-image-generation`,
@@ -3096,6 +3086,17 @@ async function generatePicture(initiator, args, trigger, message, callback) {
             message: t`Generating an image...`,
             onStop: stopListener,
         });
+
+        const combineNegatives = (prefix) => { negativePromptPrefix = combinePrefixes(negativePromptPrefix, prefix); };
+
+        // generate the text prompt for the image
+        let prompt = await getPrompt(generationType, message, trigger, quietPrompt, combineNegatives, abortController.signal);
+        console.log('Processed image prompt:', prompt);
+
+        // Extension hook for prompt processing
+        const eventData = { prompt, generationType, message, trigger };
+        await eventSource.emit(event_types.SD_PROMPT_PROCESSING, eventData);
+        prompt = eventData.prompt; // Allow extensions to modify the prompt
 
         // generate the image
         imagePath = await sendGenerationRequest(generationType, prompt, negativePromptPrefix, characterName, callback, initiator, abortController.signal);
@@ -3115,6 +3116,7 @@ async function generatePicture(initiator, args, trigger, message, callback) {
         toastr.error(errorText, 'Image Generation');
         throw new Error(errorText);
     } finally {
+        args?._abortController?.removeEventListener?.('abort', stopListener);
         restoreOriginalDimensions(dimensions);
         await loaderHandle.hide();
     }
@@ -3184,9 +3186,10 @@ function restoreOriginalDimensions(savedParams) {
  * @param {string} trigger A trigger string to use for the image generation.
  * @param {string} quietPrompt A quiet prompt to use for the image generation.
  * @param {function} combineNegatives A function that combines the negative prompt with other prompts.
+ * @param {AbortSignal} signal Signal used to cancel prompt generation.
  * @returns {Promise<string>} - A promise that resolves when the prompt generation completes.
  */
-async function getPrompt(generationType, message, trigger, quietPrompt, combineNegatives) {
+async function getPrompt(generationType, message, trigger, quietPrompt, combineNegatives, signal) {
     let prompt;
     console.log('getPrompt: Generation mode', generationType, 'triggered with', trigger);
     switch (generationType) {
@@ -3199,7 +3202,7 @@ async function getPrompt(generationType, message, trigger, quietPrompt, combineN
         case generationMode.FACE_MULTIMODAL:
         case generationMode.CHARACTER_MULTIMODAL:
         case generationMode.USER_MULTIMODAL:
-            prompt = await generateMultimodalPrompt(generationType, quietPrompt);
+            prompt = await generateMultimodalPrompt(generationType, quietPrompt, signal);
             break;
         default:
             prompt = await generatePrompt(quietPrompt);
@@ -3252,8 +3255,9 @@ function generateFreeModePrompt(trigger, combineNegatives) {
  * Generates a prompt using multimodal captioning.
  * @param {number} generationType - The type of image generation to perform.
  * @param {string} quietPrompt - The prompt to use for the image generation.
+ * @param {AbortSignal} signal - Signal used to cancel captioning.
  */
-async function generateMultimodalPrompt(generationType, quietPrompt) {
+async function generateMultimodalPrompt(generationType, quietPrompt, signal) {
     let avatarUrl;
 
     if (generationType === generationMode.USER_MULTIMODAL) {
@@ -3264,9 +3268,9 @@ async function generateMultimodalPrompt(generationType, quietPrompt) {
         avatarUrl = getCharacterAvatarUrl();
     }
 
+    const toast = toastr.info('Generating multimodal caption...', 'Image Generation');
     try {
-        const toast = toastr.info('Generating multimodal caption...', 'Image Generation');
-        const response = await fetch(avatarUrl);
+        const response = await fetch(avatarUrl, { signal });
 
         if (!response.ok) {
             throw new Error('Could not fetch avatar image.');
@@ -3275,8 +3279,7 @@ async function generateMultimodalPrompt(generationType, quietPrompt) {
         const avatarBlob = await response.blob();
         const avatarBase64 = await getBase64Async(avatarBlob);
 
-        const caption = await getMultimodalCaption(avatarBase64, quietPrompt);
-        toastr.clear(toast);
+        const caption = await getMultimodalCaption(avatarBase64, quietPrompt, signal);
 
         if (!caption) {
             throw new Error('No caption returned from the API.');
@@ -3284,10 +3287,15 @@ async function generateMultimodalPrompt(generationType, quietPrompt) {
 
         return caption;
     } catch (error) {
+        if (signal?.aborted) {
+            throw error;
+        }
         console.error(error);
         const errorMessage = error?.message || String(error) || 'Multimodal captioning failed.';
         toastr.error(errorMessage, 'Image Generation');
         throw new Error(errorMessage, { cause: error });
+    } finally {
+        toastr.clear(toast);
     }
 }
 
@@ -3306,7 +3314,7 @@ function getCharacterAvatarUrl() {
 }
 
 function getUserAvatarUrl() {
-    return getUserAvatar(user_avatar, { forFetch: true });
+    return getUserAvatar(user_avatar);
 }
 
 /**
@@ -4989,10 +4997,12 @@ async function sendMessage(prompt, image, generationType, additionalNegativePref
             inline_image: false,
         },
     };
-    context.chat.push(message);
-    const messageId = context.chat.length - 1;
-    await eventSource.emit(event_types.MESSAGE_RECEIVED, messageId, 'extension');
-    context.addOneMessage(message);
+    const messageId = context.chat.length;
+    await withChatSurfaceStructureMutation(async () => {
+        context.chat.push(message);
+        await eventSource.emit(event_types.MESSAGE_RECEIVED, messageId, 'extension');
+        context.addOneMessage(message);
+    });
     await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, messageId, 'extension');
     await context.saveChat();
     setTimeout(() => context.scrollOnMediaLoad(), debounce_timeout.short);

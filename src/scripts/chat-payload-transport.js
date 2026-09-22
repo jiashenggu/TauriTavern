@@ -1,20 +1,22 @@
 export { payloadToJsonl, jsonlToPayload } from './tauri/chat/jsonl.js';
 export {
-    isTauriChatPayloadTransportEnabled,
+    CHAT_COMMIT_REASON,
     normalizeChatFileName,
     resolveCharacterDirectoryId,
     loadCharacterChatPayload,
-    loadCharacterChatPayloadTail,
-    loadCharacterChatPayloadBefore,
-    loadCharacterChatPayloadBeforePages,
     saveCharacterChatPayload,
-    saveCharacterChatPayloadWindowed,
-    patchCharacterChatPayloadWindowed,
+    saveCharacterChatMetadata,
     loadGroupChatPayload,
-    loadGroupChatPayloadTail,
-    loadGroupChatPayloadBefore,
-    loadGroupChatPayloadBeforePages,
     saveGroupChatPayload,
-    saveGroupChatPayloadWindowed,
-    patchGroupChatPayloadWindowed,
+    saveGroupChatMetadata,
 } from './tauri/chat/transport.js';
+
+export {
+    initializeColdSwipes,
+    coldSwipesEnabled,
+    acceptColdChatPayload,
+    discardColdChatPayload,
+    releaseCurrentSwipeSource,
+    hydrateMessageSwipes,
+    readColdSwipeRecord,
+} from './tauri/chat/cold-swipes.js';

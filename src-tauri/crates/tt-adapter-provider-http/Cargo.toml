@@ -1,0 +1,24 @@
+[package]
+name = "tt-adapter-provider-http"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+base64 = "0.23"
+futures-util = "0.3"
+jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+percent-encoding = "2"
+reqwest = { workspace = true, features = ["form", "http2", "json", "multipart", "query", "rustls", "stream"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { version = "1", default-features = false, features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+tracing = "0.1"
+tt-adapter-http = { path = "../tt-adapter-http" }
+tt-domain = { path = "../tt-domain" }
+tt-ports = { path = "../tt-ports" }
+url = { workspace = true }
+uuid = { workspace = true }

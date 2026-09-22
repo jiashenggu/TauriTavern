@@ -4,11 +4,23 @@ import assert from 'node:assert/strict';
 import { createTauriTavernSettingsState } from '../src/scripts/tauri/setting/setting-panel/settings-state.js';
 import { buildTauriTavernSettingsUpdate } from '../src/scripts/tauri/setting/setting-panel/settings-patch.js';
 
+const MEBIBYTE_BYTES = 1024 * 1024;
+const GIBIBYTE_BYTES = 1024 * MEBIBYTE_BYTES;
+
 function createSettings(overrides = {}) {
     return {
         panel_runtime_profile: 'off',
         embedded_runtime_profile: 'off',
-        chat_history_mode: 'windowed',
+        chat_virtualization_enabled: false,
+        cold_swipes_enabled: false,
+        codemirror_editor_enabled: false,
+        chat_backups: {
+            automatic_enabled: true,
+            zstd_compression_enabled: false,
+            max_files_per_prefix: 20,
+            max_total_files: 500,
+            max_total_bytes: 1024 * 1024 * 1024,
+        },
         close_to_tray_on_close: false,
         request_proxy: {
             enabled: false,
@@ -17,7 +29,6 @@ function createSettings(overrides = {}) {
         },
         allow_keys_exposure: false,
         avatar_persona_original_images_enabled: false,
-        native_regex_backend_enabled: true,
         dynamic_theme: {
             enabled: false,
             day_theme: 'Default',
@@ -35,42 +46,59 @@ function createSettings(overrides = {}) {
     };
 }
 
+function createDraft(initial, overrides = {}) {
+    const maxTotalBytes = initial.chatBackups.maxTotalBytes;
+    const maxTotalUnit = maxTotalBytes >= GIBIBYTE_BYTES ? 'GiB' : 'MiB';
+
+    return {
+        ...initial,
+        ...overrides,
+        chatBackups: {
+            automaticEnabled: initial.chatBackups.automaticEnabled,
+            zstdCompressionEnabled: initial.chatBackups.zstdCompressionEnabled,
+            maxFilesPerPrefix: initial.chatBackups.maxFilesPerPrefix,
+            maxTotalFiles: initial.chatBackups.maxTotalFiles,
+            maxTotalValue: maxTotalBytes > 0
+                ? maxTotalBytes / (maxTotalUnit === 'GiB' ? GIBIBYTE_BYTES : MEBIBYTE_BYTES)
+                : maxTotalBytes,
+            maxTotalUnit,
+            ...overrides.chatBackups,
+        },
+    };
+}
+
 test('buildTauriTavernSettingsUpdate returns an empty patch for unchanged settings', () => {
-    const initial = createTauriTavernSettingsState(createSettings(), {
-        nativeRegexBackendEnabled: true,
-    });
+    const initial = createTauriTavernSettingsState(createSettings());
 
     assert.equal(initial.dynamicTheme.dayWallpaper, ' Day.png');
     assert.equal(initial.dynamicTheme.nightWallpaper, 'Night .png');
 
-    const update = buildTauriTavernSettingsUpdate(initial, {
-        ...initial,
+    const update = buildTauriTavernSettingsUpdate(initial, createDraft(initial, {
         dynamicTheme: { ...initial.dynamicTheme },
         requestProxy: {
             enabled: false,
             url: '',
             bypass: '',
         },
-    });
+    }));
 
     assert.equal(update.hasChanges, false);
     assert.deepEqual(update.patch, {});
 });
 
-test('buildTauriTavernSettingsUpdate preserves minimal nested patch semantics', () => {
-    const initial = createTauriTavernSettingsState(createSettings(), {
-        nativeRegexBackendEnabled: true,
-    });
 
-    const update = buildTauriTavernSettingsUpdate(initial, {
-        ...initial,
+
+test('buildTauriTavernSettingsUpdate preserves minimal nested patch semantics', () => {
+    const initial = createTauriTavernSettingsState(createSettings());
+
+    const update = buildTauriTavernSettingsUpdate(initial, createDraft(initial, {
         promptCacheTtl: '5m',
         requestProxy: {
             enabled: true,
             url: ' http://127.0.0.1:7890 ',
             bypass: 'localhost, 127.0.0.1\n10.0.0.0/8',
         },
-    });
+    }));
 
     assert.equal(update.hasChanges, true);
     assert.deepEqual(update.patch, {
@@ -87,53 +115,80 @@ test('buildTauriTavernSettingsUpdate preserves minimal nested patch semantics', 
     });
 });
 
-test('buildTauriTavernSettingsUpdate persists dynamic wallpaper settings with theme settings', () => {
-    const initial = createTauriTavernSettingsState(createSettings(), {
-        nativeRegexBackendEnabled: true,
-    });
-
-    const update = buildTauriTavernSettingsUpdate(initial, {
-        ...initial,
-        dynamicTheme: {
-            ...initial.dynamicTheme,
-            wallpaperEnabled: true,
-            dayWallpaper: ' Soft Morning.png',
-            nightWallpaper: 'Deep Night .webp',
+test('unchanged storage display does not rewrite a non-MiB-aligned byte limit', () => {
+    const initial = createTauriTavernSettingsState(createSettings({
+        chat_backups: {
+            automatic_enabled: true,
+            zstd_compression_enabled: false,
+            max_files_per_prefix: 20,
+            max_total_files: 500,
+            max_total_bytes: 1024 * 1024 + 1,
         },
-    });
+    }));
 
-    assert.equal(update.hasChanges, true);
+    const update = buildTauriTavernSettingsUpdate(initial, createDraft(initial));
+
+    assert.equal(update.hasChanges, false);
+    assert.deepEqual(update.patch, {});
+    assert.equal(update.next.chatBackups.maxTotalBytes, 1024 * 1024 + 1);
+});
+
+test('buildTauriTavernSettingsUpdate flags the destructive zero limit transition', () => {
+    const initial = createTauriTavernSettingsState(createSettings());
+
+    const update = buildTauriTavernSettingsUpdate(initial, createDraft(initial, {
+        chatBackups: {
+            maxTotalFiles: 0,
+        },
+    }));
+
+    assert.equal(update.requiresChatBackupPurgeConfirmation, true);
     assert.deepEqual(update.patch, {
-        dynamic_theme: {
-            enabled: false,
-            day_theme: 'Default',
-            night_theme: 'Dark',
-            wallpaper_enabled: true,
-            day_wallpaper: ' Soft Morning.png',
-            night_wallpaper: 'Deep Night .webp',
+        chat_backups: {
+            max_total_files: 0,
         },
     });
 });
 
-test('buildTauriTavernSettingsUpdate persists embedded runtime legacy migration', () => {
-    const initial = createTauriTavernSettingsState(createSettings({
-        embedded_runtime_profile: 'compat',
-    }), {
-        nativeRegexBackendEnabled: true,
-    });
-    const legacyEffectiveInitial = {
-        ...initial,
-        configuredEmbeddedRuntimeProfile: 'auto',
-        embeddedRuntimeProfile: 'compat',
-    };
 
-    const update = buildTauriTavernSettingsUpdate(legacyEffectiveInitial, {
-        ...legacyEffectiveInitial,
-        embeddedRuntimeProfile: 'compat',
-    });
+test('buildTauriTavernSettingsUpdate rejects invalid chat backup limits', () => {
+    const initial = createTauriTavernSettingsState(createSettings());
 
-    assert.equal(update.hasChanges, true);
-    assert.deepEqual(update.patch, {
-        embedded_runtime_profile: 'compat',
-    });
+    assert.throws(
+        () => buildTauriTavernSettingsUpdate(initial, createDraft(initial, {
+            chatBackups: {
+                maxFilesPerPrefix: -2,
+            },
+        })),
+        /must be -1, 0, or a positive integer/,
+    );
+    assert.throws(
+        () => buildTauriTavernSettingsUpdate(initial, createDraft(initial, {
+            chatBackups: {
+                maxTotalValue: '',
+                maxTotalUnit: 'GiB',
+            },
+        })),
+        /must be -1, 0, or a positive number/,
+    );
+});
+
+test('MiB and GiB chat backup inputs save the same byte limit', () => {
+    const initial = createTauriTavernSettingsState(createSettings());
+
+    const fromMiB = buildTauriTavernSettingsUpdate(initial, createDraft(initial, {
+        chatBackups: {
+            maxTotalValue: 1536,
+            maxTotalUnit: 'MiB',
+        },
+    }));
+    const fromGiB = buildTauriTavernSettingsUpdate(initial, createDraft(initial, {
+        chatBackups: {
+            maxTotalValue: 1.5,
+            maxTotalUnit: 'GiB',
+        },
+    }));
+
+    assert.equal(fromMiB.patch.chat_backups.max_total_bytes, 1536 * 1024 * 1024);
+    assert.deepEqual(fromGiB.patch, fromMiB.patch);
 });

@@ -1,6 +1,6 @@
 import { DOMPurify } from '../lib.js';
 
-import { addOneMessage, chat, event_types, eventSource, getGeneratingApi, getGeneratingModel, main_api, saveChatConditional, system_avatar, systemUserName } from '../script.js';
+import { addOneMessage, chat, event_types, eventSource, main_api, saveChatConditional, system_avatar, withChatSurfaceStructureMutation } from '../script.js';
 import { chat_completion_sources, custom_prompt_post_processing_types, getChatCompletionModel, model_list, oai_settings } from './openai.js';
 import { Popup } from './popup.js';
 import { SlashCommand } from './slash-commands/SlashCommand.js';
@@ -12,6 +12,7 @@ import { SlashCommandParser } from './slash-commands/SlashCommandParser.js';
 import { slashCommandReturnHelper } from './slash-commands/SlashCommandReturnHelper.js';
 import { isTrueBoolean } from './utils.js';
 import { getActiveIosPolicyCapabilities } from './tauritavern/ios-policy.js';
+import { getEffectiveGenerationSettings } from './tauri/generation-params/omission.js';
 
 /**
  * @typedef {object} ToolInvocation
@@ -22,6 +23,7 @@ import { getActiveIosPolicyCapabilities } from './tauritavern/ios-policy.js';
  * @property {string} result - The result of the tool invocation.
  * @property {string?} signature - The thought signature associated with the tool invocation.
  * @property {string?} reasoning - The plaintext reasoning associated with this tool call turn.
+ * @property {unknown} [extra_content] - Opaque provider metadata attached to the tool call.
  * @property {boolean} [error] - Whether the tool invocation failed.
  */
 
@@ -30,6 +32,13 @@ import { getActiveIosPolicyCapabilities } from './tauritavern/ios-policy.js';
  * @property {ToolInvocation[]} invocations Tool invocations (both successful and failed)
  * @property {Error[]} errors Errors that occurred during tool invocation
  * @property {string[]} stealthCalls Names of stealth tools that were invoked
+ */
+
+/**
+ * @typedef {object} RequestScopedTool
+ * @property {string} displayName
+ * @property {() => string|Promise<string>} formatMessage
+ * @property {(call: {argumentsJson: string, signal?: AbortSignal}) => Promise<{result: string, error: boolean}>} invoke
  */
 
 /**
@@ -255,6 +264,19 @@ export class ToolManager {
      */
     static RECURSE_LIMIT = 5;
 
+    static #modelDisablesToolCalls(settings, model) {
+        const source = settings.chat_completion_source;
+        const openAiSources = [
+            chat_completion_sources.OPENAI,
+            chat_completion_sources.AZURE_OPENAI,
+            chat_completion_sources.OPENROUTER,
+        ];
+        const isO1 = [chat_completion_sources.OPENAI, chat_completion_sources.AZURE_OPENAI].includes(source)
+            ? /^o1/.test(model)
+            : source === chat_completion_sources.OPENROUTER && /^openai\/o1/.test(model);
+        return isO1 || openAiSources.includes(source) && /gpt-5-chat-latest/.test(model);
+    }
+
     /**
      * Returns an Array of all tools that have been registered.
      * @type {ToolDefinition[]}
@@ -332,7 +354,14 @@ export class ToolManager {
             const invokeParameters = this.#parseParameters(parameters);
             const tool = this.#tools.get(name);
             const result = await tool.invoke(invokeParameters);
-            return typeof result === 'string' ? result : JSON.stringify(result);
+            if (typeof result === 'string') {
+                return result;
+            }
+            const serializedResult = JSON.stringify(result);
+            if (typeof serializedResult !== 'string') {
+                throw new TypeError(`Tool "${name}" returned a result that is not JSON-serializable.`);
+            }
+            return serializedResult;
         } catch (error) {
             console.error(`[ToolManager] An error occurred while invoking the tool "${name}":`, error);
 
@@ -621,6 +650,11 @@ export class ToolManager {
             return false;
         }
 
+        return ToolManager.supportsToolCalling(settings, model);
+    }
+
+    /** Checks provider/model capability independently of automatic tool registration. */
+    static supportsToolCalling(settings = oai_settings, model = getChatCompletionModel(settings)) {
         const currentModel = Array.isArray(model_list) ? model_list.find(m => m.id === model) : null;
         if (currentModel) {
             switch (settings.chat_completion_source) {
@@ -645,6 +679,7 @@ export class ToolManager {
 
         const supportedSources = [
             chat_completion_sources.OPENAI,
+            chat_completion_sources.OPENCODE,
             chat_completion_sources.CUSTOM,
             chat_completion_sources.MISTRALAI,
             chat_completion_sources.CLAUDE,
@@ -688,17 +723,41 @@ export class ToolManager {
         return isSupported && !noToolCallTypes.includes(type);
     }
 
+    static canAdvertiseToolCalls(type, settings = null, model = null) {
+        settings = settings ?? oai_settings;
+        model = model ?? getChatCompletionModel(settings);
+        return ToolManager.canPerformToolCalls(type, settings, model)
+            && !ToolManager.canPerformMultiSwipe(type, settings)
+            && !ToolManager.#modelDisablesToolCalls(settings, model);
+    }
+
+    static canPerformMultiSwipe(type, settings = null) {
+        settings = getEffectiveGenerationSettings(settings ?? oai_settings);
+        const supportedSources = [
+            chat_completion_sources.OPENAI,
+            chat_completion_sources.AZURE_OPENAI,
+            chat_completion_sources.CUSTOM,
+            chat_completion_sources.XAI,
+            chat_completion_sources.AIMLAPI,
+            chat_completion_sources.MOONSHOT,
+        ];
+        return settings.n > 1
+            && !(settings.chat_completion_source === chat_completion_sources.CUSTOM && settings.custom_api_format === 'gemini_generate_content')
+            && !['quiet', 'impersonate', 'continue'].includes(type)
+            && supportedSources.includes(settings.chat_completion_source);
+    }
+
     /**
      * Utility function to get tool calls from the response data.
      * @param {any} data Response data
      * @returns {any[]} Tool calls from the response data
      */
-    static #getToolCallsFromData(data) {
+    static getToolCallsFromData(data) {
         const getRandomId = () => Math.random().toString(36).substring(2);
         const isClaudeToolCall = c => Array.isArray(c) ? c.filter(x => x).every(isClaudeToolCall) : c?.input && c?.name && c?.id;
         const isGoogleToolCall = c => Array.isArray(c) ? c.filter(x => x).every(isGoogleToolCall) : c?.name && c?.args;
         const convertClaudeToolCall = c => ({ id: c.id, function: { name: c.name, arguments: c.input } });
-        const convertGoogleToolCall = (c, signature = null) => ({ id: getRandomId(), function: { name: c.name, arguments: c.args }, signature });
+        const convertGoogleToolCall = (c, signature = null) => ({ id: c.id || getRandomId(), function: { name: c.name, arguments: c.args }, signature });
 
         // Parsed tool calls from streaming data
         if (Array.isArray(data) && data.length > 0 && Array.isArray(data[0])) {
@@ -763,62 +822,139 @@ export class ToolManager {
      * @returns {boolean} Whether the response data contains tool calls
      */
     static hasToolCalls(data) {
-        const toolCalls = ToolManager.#getToolCallsFromData(data);
+        const toolCalls = ToolManager.getToolCallsFromData(data);
         return Array.isArray(toolCalls) && toolCalls.length > 0;
     }
 
     /**
      * Check for function tool calls in the response data and invoke them.
      * @param {any} data Reply data
-     * @param {{reasoningText?: string?}} options Invocation options
+     * @param {{reasoningText?: string?, onCallsReady?: (calls: ChatToolCall[]) => void, onInvocationComplete?: (invocation: ToolInvocation) => void, toolResolver?: (name: string) => RequestScopedTool|null, signal?: AbortSignal}} options Invocation options
      * @returns {Promise<ToolInvocationResult>} Tool invocation result
      */
-    static async invokeFunctionTools(data, { reasoningText = null } = {}) {
+    static async invokeFunctionTools(data, { reasoningText = null, onCallsReady = null, onInvocationComplete = null, toolResolver = null, signal = null } = {}) {
         /** @type {ToolInvocationResult} */
         const result = {
             invocations: [],
             errors: [],
             stealthCalls: [],
         };
-        const toolCalls = ToolManager.#getToolCallsFromData(data);
+        const toolCalls = ToolManager.getToolCallsFromData(data);
+        const throwIfAborted = () => {
+            if (signal?.aborted) {
+                const error = new Error(typeof signal.reason === 'string' ? signal.reason : 'Generation was aborted.');
+                error.name = 'AbortError';
+                throw error;
+            }
+        };
 
         if (!Array.isArray(toolCalls)) {
             return result;
         }
 
+        const normalizedToolCalls = [];
+        const toolCallIds = new Set();
         for (const toolCall of toolCalls) {
             if (!toolCall || !toolCall.function || typeof toolCall.function !== 'object') {
+                const error = new Error('Provider returned a malformed tool call');
+                error.cause = 'Unknown tool';
+                result.errors.push(error);
                 continue;
             }
 
-            console.log('[ToolManager] Function tool call:', toolCall);
             const id = toolCall.id;
             const parameters = toolCall.function.arguments;
             const name = toolCall.function.name;
-            const displayName = ToolManager.getDisplayName(name);
-            const isStealth = ToolManager.isStealthTool(name);
-            const message = await ToolManager.formatToolCallMessage(name, parameters);
+            const serializedParameters = stringify(parameters);
+            if (typeof id !== 'string' || !id.trim() || typeof name !== 'string' || !name.trim() || typeof serializedParameters !== 'string') {
+                const error = new Error('Provider returned a tool call without a valid id, name, or arguments');
+                error.cause = typeof name === 'string' && name ? name : 'Unknown tool';
+                result.errors.push(error);
+                continue;
+            }
+            if (toolCallIds.has(id)) {
+                const error = new Error(`Provider returned duplicate tool call id "${id}"`);
+                error.cause = name;
+                result.errors.push(error);
+                continue;
+            }
+            toolCallIds.add(id);
+            const requestTool = toolResolver?.(name) ?? null;
+            normalizedToolCalls.push({
+                toolCall,
+                id,
+                parameters,
+                serializedParameters,
+                name,
+                requestTool,
+                displayName: requestTool?.displayName ?? ToolManager.getDisplayName(name),
+                isStealth: requestTool ? false : ToolManager.isStealthTool(name),
+            });
+        }
+
+        if (result.errors.length > 0) {
+            return result;
+        }
+
+        const projectProgress = normalizedToolCalls.length > 0 && normalizedToolCalls.every(call => !call.isStealth);
+        if (projectProgress && typeof onCallsReady === 'function') {
+            onCallsReady(normalizedToolCalls.map(({ toolCall, id, serializedParameters, name, displayName }) => ({
+                id,
+                name,
+                displayName,
+                parameters: serializedParameters,
+                signature: toolCall.signature || null,
+                ...(Object.hasOwn(toolCall, 'extra_content') ? { extra_content: toolCall.extra_content } : {}),
+            })));
+        }
+
+        for (const { toolCall, id, parameters, serializedParameters, name, requestTool, displayName, isStealth } of normalizedToolCalls) {
+            throwIfAborted();
+            console.log('[ToolManager] Function tool call:', toolCall);
+            const message = requestTool
+                ? await requestTool.formatMessage()
+                : await ToolManager.formatToolCallMessage(name, parameters);
             const toast = message && toastr.info(message, 'Tool Calling', { timeOut: 0 });
-            const toolResult = await ToolManager.invokeFunctionTool(name, parameters);
-            toastr.clear(toast);
+            let toolResult;
+            let toolError;
+            try {
+                throwIfAborted();
+                if (requestTool) {
+                    const outcome = await requestTool.invoke({
+                        argumentsJson: serializedParameters,
+                        signal,
+                    });
+                    toolResult = outcome.result;
+                    toolError = outcome.error === true;
+                } else {
+                    toolResult = await ToolManager.invokeFunctionTool(name, parameters);
+                    toolError = toolResult instanceof Error;
+                }
+            } finally {
+                toastr.clear(toast);
+            }
             console.log('[ToolManager] Function tool result:', result);
 
             // Save failed tool calls so the model can observe the failure.
-            if (toolResult instanceof Error) {
-                result.errors.push(toolResult);
+            if (toolError) {
+                const error = toolResult instanceof Error ? toolResult : new Error(toolResult, { cause: name });
+                result.errors.push(error);
                 if (isStealth) {
                     result.stealthCalls.push(name);
                 } else {
-                    result.invocations.push({
+                    const invocation = {
                         id,
                         displayName,
                         name,
-                        parameters: stringify(parameters),
-                        result: toolResult.toString(),
+                        parameters: serializedParameters,
+                        result: toolResult instanceof Error ? toolResult.toString() : toolResult,
                         error: true,
                         signature: toolCall.signature || null,
                         reasoning: reasoningText || null,
-                    });
+                        ...(Object.hasOwn(toolCall, 'extra_content') ? { extra_content: toolCall.extra_content } : {}),
+                    };
+                    result.invocations.push(invocation);
+                    projectProgress && onInvocationComplete?.(invocation);
                 }
                 continue;
             }
@@ -833,13 +969,15 @@ export class ToolManager {
                 id,
                 displayName,
                 name,
-                parameters: stringify(parameters),
+                parameters: serializedParameters,
                 result: toolResult,
                 error: false,
                 signature: toolCall.signature || null,
                 reasoning: reasoningText || null,
+                ...(Object.hasOwn(toolCall, 'extra_content') ? { extra_content: toolCall.extra_content } : {}),
             };
             result.invocations.push(invocation);
+            projectProgress && onInvocationComplete?.(invocation);
         }
 
         return result;
@@ -860,56 +998,96 @@ export class ToolManager {
 
     /**
      * Formats a message with tool invocations.
-     * @param {ToolInvocation[]} invocations Tool invocations.
+     * @param {Array<ToolInvocation|ChatToolCall>} invocations Tool invocations, optionally without a result while running.
      * @returns {string} Formatted message with tool invocations.
      */
-    static #formatToolInvocationMessage(invocations) {
-        const data = structuredClone(invocations);
+    static formatToolInvocationMessage(invocations) {
         const detailsElement = document.createElement('details');
         const summaryElement = document.createElement('summary');
-        const preElement = document.createElement('pre');
-        const codeElement = document.createElement('code');
-        codeElement.classList.add('language-json');
-        data.forEach(i => {
-            i.parameters = tryParse(i.parameters);
-            i.result = tryParse(i.result);
-        });
-        codeElement.textContent = JSON.stringify(data, null, 2);
-        const toolNames = data.map(i => i.displayName || i.name);
+        const listElement = document.createElement('div');
+        listElement.classList.add('toolInvocationList');
+        const toolNames = invocations.map(i => i.displayName || i.name);
         summaryElement.textContent = `Tool calls: ${this.#groupToolNames(toolNames)}`;
-        preElement.append(codeElement);
-        detailsElement.append(summaryElement, preElement);
+
+        for (const invocation of invocations) {
+            const invocationElement = document.createElement('section');
+            const titleElement = document.createElement('strong');
+            titleElement.textContent = invocation.displayName || invocation.name;
+            invocationElement.classList.add('toolInvocation');
+            invocationElement.append(titleElement);
+
+            const fields = [
+                ['Arguments', invocation.parameters],
+                invocation.result === undefined ? ['Status', 'Running…'] : ['Result', invocation.result],
+            ];
+            for (const [label, value] of fields) {
+                const labelElement = document.createElement('span');
+                const preElement = document.createElement('pre');
+                const codeElement = document.createElement('code');
+                const parsed = tryParse(value);
+                labelElement.classList.add('toolInvocationLabel');
+                labelElement.textContent = label;
+                codeElement.classList.add('language-json');
+                codeElement.textContent = typeof parsed === 'string' ? parsed : (JSON.stringify(parsed, null, 2) ?? '');
+                preElement.append(codeElement);
+                invocationElement.append(labelElement, preElement);
+            }
+
+            listElement.append(invocationElement);
+        }
+
+        detailsElement.append(summaryElement, listElement);
         return detailsElement.outerHTML;
     }
 
     /**
-     * Saves function tool invocations to the last user chat message extra metadata.
+     * Atomically commits one Assistant tool turn after every tool has finished.
      * @param {ToolInvocation[]} invocations Tool invocations to persist
-     * @param {any?} native Provider-native metadata to persist for future turns
-     * @param {string?} reasoningContent Provider reasoning content needed to continue tool-call turns
+     * @param {ChatMessage} ownerMessage Assistant message that emitted the calls
+     * @param {string?} reasoningContent Provider reasoning content needed to continue the turn
      */
-    static async saveFunctionToolInvocations(invocations, native = null, reasoningContent = null) {
-        if (!Array.isArray(invocations) || invocations.length === 0) {
-            return;
-        }
-        const message = {
-            name: systemUserName,
+    static async saveFunctionToolTurn(invocations, ownerMessage, reasoningContent = null) {
+        const toolCalls = invocations.map(invocation => ({
+            id: invocation.id,
+            name: invocation.name,
+            displayName: invocation.displayName,
+            parameters: invocation.parameters,
+            signature: invocation.signature,
+            ...(Object.hasOwn(invocation, 'extra_content') ? { extra_content: invocation.extra_content } : {}),
+        }));
+        const toolMessages = invocations.map(invocation => ({
+            role: /** @type {const} */ ('tool'),
+            name: invocation.name,
             force_avatar: system_avatar,
             is_system: true,
             is_user: false,
-            mes: ToolManager.#formatToolInvocationMessage(invocations),
-            extra: {
-                isSmallSys: true,
-                tool_invocations: invocations,
-                api: getGeneratingApi(),
-                model: getGeneratingModel(),
-                ...(native !== null && native !== undefined ? { native } : {}),
-                ...(reasoningContent ? { tool_reasoning_content: reasoningContent } : {}),
-            },
-        };
-        chat.push(message);
-        await eventSource.emit(event_types.TOOL_CALLS_PERFORMED, invocations);
-        addOneMessage(message);
+            send_date: Date.now(),
+            mes: invocation.result,
+            tool_call_id: invocation.id,
+            error: invocation.error === true,
+        }));
+
+        await withChatSurfaceStructureMutation(async () => {
+            const ownerIndex = chat.indexOf(ownerMessage);
+            if (ownerIndex < 0) {
+                throw new Error('Cannot save tool results because the Assistant owner left the active chat');
+            }
+            ownerMessage.tool_calls = toolCalls;
+            ownerMessage.extra ??= {};
+            if (reasoningContent) {
+                ownerMessage.extra.tool_reasoning_content = reasoningContent;
+            } else {
+                delete ownerMessage.extra.tool_reasoning_content;
+            }
+            const firstToolMessageId = chat.length;
+            chat.push(...toolMessages);
+            await eventSource.emit(event_types.TOOL_CALLS_PERFORMED, invocations);
+            toolMessages.forEach((message, index) => addOneMessage(message, {
+                forceId: firstToolMessageId + index,
+                scroll: index === toolMessages.length - 1,
+                showSwipes: index === toolMessages.length - 1,
+            }));
+        });
         await eventSource.emit(event_types.TOOL_CALLS_RENDERED, invocations);
         await saveChatConditional();
     }

@@ -97,6 +97,7 @@ export function installChatEmbeddedRuntimeAdapters({ manager }) {
 
     /** @type {WeakSet<HTMLElement>} */
     let scannedMessages = new WeakSet();
+    let disposed = false;
 
     /** @param {HTMLElement} messageElement */
     const scanMessageElement = (messageElement) => {
@@ -142,7 +143,7 @@ export function installChatEmbeddedRuntimeAdapters({ manager }) {
         }
 
         const placeholder = target.closest(PLACEHOLDER_SELECTOR);
-        if (!placeholder) {
+        if (!placeholder || (placeholder instanceof HTMLElement && placeholder.dataset.ttRuntimeParkReason === 'source-unavailable')) {
             return;
         }
 
@@ -152,12 +153,16 @@ export function installChatEmbeddedRuntimeAdapters({ manager }) {
             return;
         }
 
-        manager.invalidate(id);
+        manager.touch(id);
     };
 
     const observer = new MutationObserver((records) => {
         for (const record of records) {
             const target = record.target;
+            if (record.type === 'attributes' && target instanceof HTMLIFrameElement) {
+                scanForHosts(manager, target, adapters);
+                continue;
+            }
             const slotHost = target instanceof Element ? target.closest(SLOT_ID_SELECTOR) : null;
             for (const removedNode of record.removedNodes) {
                 if (removedNode instanceof HTMLIFrameElement) {
@@ -235,6 +240,7 @@ export function installChatEmbeddedRuntimeAdapters({ manager }) {
                 }
 
                 if (addedNode instanceof HTMLIFrameElement || addedNode.tagName === 'IFRAME') {
+                    if (addedNode instanceof HTMLElement && addedNode.dataset.ttRuntimeManaged === '1') continue;
                     const slotHost = addedNode.closest(SLOT_ID_SELECTOR);
                     if (slotHost instanceof HTMLElement) {
                         slotHost.querySelectorAll(`${PLACEHOLDER_SELECTOR}, ${GHOST_SELECTOR}`).forEach((el) => el.remove());
@@ -258,10 +264,16 @@ export function installChatEmbeddedRuntimeAdapters({ manager }) {
     });
 
     const onChatChanged = () => {
+        if (disposed) {
+            return;
+        }
         scannedMessages = new WeakSet();
         scanUnseenMessages();
     };
     const onChatLoaded = () => {
+        if (disposed) {
+            return;
+        }
         scanUnseenMessages();
     };
     const onMoreMessagesLoaded = () => {
@@ -286,11 +298,21 @@ export function installChatEmbeddedRuntimeAdapters({ manager }) {
     };
 
     scanUnseenMessages();
-    observer.observe(chat, { childList: true, subtree: true });
+    observer.observe(chat, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'srcdoc'] });
     chat.addEventListener('click', onClick, true);
 
-    eventSource.makeLast(event_types.CHAT_CHANGED, onChatChanged);
-    eventSource.makeLast(event_types.CHAT_LOADED, onChatLoaded);
+    const makeChatOpenListenersLast = () => {
+        eventSource.makeLast(event_types.CHAT_CHANGED, onChatChanged);
+        eventSource.makeLast(event_types.CHAT_LOADED, onChatLoaded);
+    };
+    const onExtensionSettingsLoaded = () => {
+        if (!disposed) {
+            makeChatOpenListenersLast();
+        }
+    };
+
+    makeChatOpenListenersLast();
+    eventSource.on(event_types.EXTENSION_SETTINGS_LOADED, onExtensionSettingsLoaded);
     eventSource.makeLast(event_types.MORE_MESSAGES_LOADED, onMoreMessagesLoaded);
 
     eventSource.makeLast(event_types.USER_MESSAGE_RENDERED, onUserMessageRendered);
@@ -300,11 +322,13 @@ export function installChatEmbeddedRuntimeAdapters({ manager }) {
 
     return {
         dispose: () => {
+            disposed = true;
             observer.disconnect();
             chat.removeEventListener('click', onClick, true);
 
             eventSource.removeListener(event_types.CHAT_CHANGED, onChatChanged);
             eventSource.removeListener(event_types.CHAT_LOADED, onChatLoaded);
+            eventSource.removeListener(event_types.EXTENSION_SETTINGS_LOADED, onExtensionSettingsLoaded);
             eventSource.removeListener(event_types.MORE_MESSAGES_LOADED, onMoreMessagesLoaded);
 
             eventSource.removeListener(event_types.USER_MESSAGE_RENDERED, onUserMessageRendered);

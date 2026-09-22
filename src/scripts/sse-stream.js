@@ -128,7 +128,7 @@ async function* parseStreamData(json) {
             for (let i = 0; i < json.delta.text.length; i++) {
                 const str = json.delta.text[i];
                 yield {
-                    data: { ...json, delta: { text: str } },
+                    data: { ...json, delta: { ...json.delta, text: str } },
                     chunk: str,
                 };
             }
@@ -140,7 +140,7 @@ async function* parseStreamData(json) {
             for (let i = 0; i < json.delta.thinking.length; i++) {
                 const str = json.delta.thinking[i];
                 yield {
-                    data: { ...json, delta: { thinking: str } },
+                    data: { ...json, delta: { ...json.delta, thinking: str } },
                     chunk: str,
                     reasoning: true,
                 };
@@ -150,30 +150,32 @@ async function* parseStreamData(json) {
     } else if (Array.isArray(json.candidates)) {
         // Google VertexAI / AI Studio
         for (let i = 0; i < json.candidates.length; i++) {
-            const isNotPrimary = json.candidates?.[0]?.index > 0;
             const hasToolCalls = json?.candidates?.[0]?.content?.parts?.some(p => p?.functionCall);
             const hasInlineData = json?.candidates?.[0]?.content?.parts?.some(p => p?.inlineData);
-            if (isNotPrimary || json.candidates.length === 0) {
-                return null;
-            }
             if (hasToolCalls || hasInlineData) {
                 yield { data: json, chunk: '' };
                 return;
             }
             if (typeof json.candidates[0].content === 'object' && Array.isArray(json.candidates[i].content.parts)) {
-                for (let j = 0; j < json.candidates[i].content.parts.length; j++) {
-                    if (typeof json.candidates[i].content.parts[j].text === 'string') {
-                        for (let k = 0; k < json.candidates[i].content.parts[j].text.length; k++) {
-                            const moreThanOnePart = json.candidates[i].content.parts.length > 1;
-                            const isNotLastPart = j !== json.candidates[i].content.parts.length - 1;
-                            const isLastSymbol = k === json.candidates[i].content.parts[j].text.length - 1;
-                            const addNewline = moreThanOnePart && isNotLastPart && isLastSymbol;
-                            const str = json.candidates[i].content.parts[j].text[k] + (addNewline ? '\n\n' : '');
+                const parts = json.candidates[i].content.parts;
+                for (let j = 0; j < parts.length; j++) {
+                    const part = parts[j];
+                    if (typeof part.text === 'string') {
+                        const chunkCount = part.text.length || (part.thoughtSignature ? 1 : 0);
+                        const hasLaterTextPart = parts.slice(j + 1).some(nextPart =>
+                            typeof nextPart.text === 'string'
+                            && nextPart.text.length > 0
+                            && Boolean(nextPart.thought) === Boolean(part.thought));
+                        for (let k = 0; k < chunkCount; k++) {
+                            const isMetadataOnly = part.text.length === 0;
+                            const isLastSymbol = k === chunkCount - 1;
+                            const addNewline = !isMetadataOnly && hasLaterTextPart && isLastSymbol;
+                            const str = (isMetadataOnly ? '' : part.text[k]) + (addNewline ? '\n\n' : '');
                             const candidateClone = structuredClone(json.candidates[0]);
                             candidateClone.content.parts[j].text = str;
                             candidateClone.content.parts = [candidateClone.content.parts[j]];
                             const candidates = [candidateClone];
-                            const reasoning = json.candidates[i].content.parts[j].thought ?? false;
+                            const reasoning = part.thought ?? false;
                             yield {
                                 data: { ...json, candidates },
                                 chunk: str,
@@ -360,10 +362,19 @@ export class SmoothEventSourceStream extends EventSourceStream {
                         return controller.enqueue(event);
                     }
 
+                    // Gemini's secondary candidates are excluded from the displayed stream.
+                    if (json.candidates?.[0]?.index > 0) return;
+
+                    let emitted = false;
                     for await (const parsed of parseStreamData(json)) {
                         !(power_user.smooth_streaming_no_think && parsed.reasoning) && hasFocus && await delay(getDelay(lastStr));
                         controller.enqueue(new MessageEvent(event.type, { data: JSON.stringify(parsed.data) }));
                         lastStr = parsed.chunk;
+                        emitted = true;
+                    }
+                    // Keep metadata-only events, such as Gemini's terminal usage snapshot.
+                    if (!emitted) {
+                        controller.enqueue(event);
                     }
                 } catch (error) {
                     if (error instanceof Error && error.cause !== NOT_PRIMARY) {

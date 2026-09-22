@@ -1,22 +1,9 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
 
 import { jsonResponse, textResponse } from '../src/tauri/main/http-utils.js';
 import { createRouteRegistry } from '../src/tauri/main/router.js';
 import { registerCharacterRoutes } from '../src/tauri/main/routes/character-routes.js';
-
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-
-function sliceSource(source, start, end) {
-    const startIndex = source.indexOf(start);
-    assert.notEqual(startIndex, -1, `Missing source marker: ${start}`);
-    const endIndex = source.indexOf(end, startIndex);
-    assert.notEqual(endIndex, -1, `Missing source marker: ${end}`);
-    return source.slice(startIndex, endIndex);
-}
 
 test('/api/characters/import returns canonical character payload and Agent post-import hints', async () => {
     const router = createRouteRegistry();
@@ -61,10 +48,7 @@ test('/api/characters/import returns canonical character payload and Agent post-
             calls.push({ type: 'normalize', character });
             return normalized;
         },
-        getAllCharacters: async (options) => {
-            calls.push({ type: 'refresh', options });
-            return [];
-        },
+        invalidateCharacterCache: () => calls.push({ type: 'invalidate' }),
     };
 
     registerCharacterRoutes(router, context, { textResponse, jsonResponse });
@@ -84,6 +68,7 @@ test('/api/characters/import returns canonical character payload and Agent post-
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), {
         file_name: 'Alice',
+        replaced: false,
         character: normalized,
         post_import: {
             has_agent_profiles: true,
@@ -112,27 +97,130 @@ test('/api/characters/import returns canonical character payload and Agent post-
         },
         { type: 'cleanup' },
         { type: 'normalize', character: imported },
-        { type: 'refresh', options: { shallow: true, forceRefresh: true } },
+        { type: 'invalidate' },
     ]);
 });
 
-test('character import Agent scan uses import payload instead of immediate character reload', async () => {
-    const source = await readFile(path.join(REPO_ROOT, 'src/script.js'), 'utf8');
-    const postprocessSource = await readFile(
-        path.join(REPO_ROOT, 'src/scripts/tauri/agent-import-postprocess.js'),
-        'utf8',
-    );
-    const importCharacterSource = sliceSource(
-        source,
-        'async function importCharacter(file',
-        'async function importFromURL',
-    );
+test('/api/characters/import uses the explicit replacement command for an existing exact avatar', async () => {
+    const router = createRouteRegistry();
+    const calls = [];
+    const imported = { name: 'Updated Alice', avatar: 'Alice.png' };
+    const context = {
+        materializeUploadFile: async () => ({
+            filePath: '/tmp/update.png',
+            cleanup: async () => calls.push({ type: 'cleanup' }),
+        }),
+        safeInvoke: async (command, args) => {
+            calls.push({ type: 'invoke', command, args });
+            return imported;
+        },
+        normalizeCharacter: character => character,
+        invalidateCharacterCache: () => calls.push({ type: 'invalidate' }),
+    };
+    registerCharacterRoutes(router, context, { textResponse, jsonResponse });
 
-    assert.match(source, /from '\.\/scripts\/tauri\/agent-import-postprocess\.js';/);
-    assert.doesNotMatch(source, /async function maybePromptForImportedCharacterAgentAssets/);
-    assert.doesNotMatch(postprocessSource, /\/api\/characters\/get/);
-    assert.match(postprocessSource, /if \(!hasProfiles && !hasSkills\) \{\s*return;\s*\}/);
-    assert.match(postprocessSource, /const loadCharacter = async \(\) => importedCharacter;/);
-    assert.doesNotMatch(importCharacterSource, /await maybePromptForImportedCharacterAgentAssets/);
-    assert.match(importCharacterSource, /enqueueImportedCharacterAgentAssetScan\(\{[\s\S]*character:\s*data\.character,[\s\S]*postImport:\s*data\.post_import,/);
+    const body = new FormData();
+    body.set('avatar', new Blob(['png-bytes'], { type: 'image/png' }), 'update.png');
+    body.set('file_type', 'png');
+    body.set('preserved_name', 'Alice.png');
+    const response = await router.handle({
+        method: 'POST',
+        path: '/api/characters/import',
+        url: new URL('http://localhost/api/characters/import'),
+        body,
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).replaced, true);
+    assert.deepEqual(calls, [
+        {
+            type: 'invoke',
+            command: 'replace_character',
+            args: { dto: { file_path: '/tmp/update.png', name: 'Alice' } },
+        },
+        { type: 'cleanup' },
+        { type: 'invalidate' },
+    ]);
+});
+
+test('/api/characters/import preserves an exact name when there is no character to replace', async () => {
+    const router = createRouteRegistry();
+    const calls = [];
+    const imported = { name: 'Alice', avatar: 'Alice.png' };
+    const context = {
+        materializeUploadFile: async () => ({
+            filePath: '/tmp/Alice.png',
+            cleanup: async () => calls.push({ type: 'cleanup' }),
+        }),
+        safeInvoke: async (command, args) => {
+            calls.push({ type: 'invoke', command, args });
+            if (command === 'replace_character') {
+                throw new Error('Not found: Character not found: Alice');
+            }
+            return imported;
+        },
+        normalizeCharacter: character => character,
+        invalidateCharacterCache: () => calls.push({ type: 'invalidate' }),
+    };
+    registerCharacterRoutes(router, context, { textResponse, jsonResponse });
+
+    const body = new FormData();
+    body.set('avatar', new Blob(['png-bytes'], { type: 'image/png' }), 'Alice.png');
+    body.set('file_type', 'png');
+    body.set('preserved_name', 'Alice.png');
+    const response = await router.handle({
+        method: 'POST',
+        path: '/api/characters/import',
+        url: new URL('http://localhost/api/characters/import'),
+        body,
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).replaced, false);
+    assert.deepEqual(calls, [
+        {
+            type: 'invoke',
+            command: 'replace_character',
+            args: { dto: { file_path: '/tmp/Alice.png', name: 'Alice' } },
+        },
+        {
+            type: 'invoke',
+            command: 'import_character',
+            args: {
+                dto: {
+                    file_path: '/tmp/Alice.png',
+                    preserve_file_name: 'Alice.png',
+                },
+            },
+        },
+        { type: 'cleanup' },
+        { type: 'invalidate' },
+    ]);
+});
+
+
+
+test('/api/characters/import rejects non-exact preserved avatar identities before staging', async () => {
+    const router = createRouteRegistry();
+    const context = {
+        materializeUploadFile: async () => {
+            throw new Error('invalid identity must be rejected before staging');
+        },
+    };
+    registerCharacterRoutes(router, context, { textResponse, jsonResponse });
+
+    for (const preservedName of ['Alice.PNG', 'Alice.png ', 'folder/Alice.png', 'Alice.png?cache=1']) {
+        const body = new FormData();
+        body.set('avatar', new Blob(['png-bytes'], { type: 'image/png' }), 'update.png');
+        body.set('file_type', 'png');
+        body.set('preserved_name', preservedName);
+        const response = await router.handle({
+            method: 'POST',
+            path: '/api/characters/import',
+            url: new URL('http://localhost/api/characters/import'),
+            body,
+        });
+
+        assert.equal(response.status, 400, preservedName);
+    }
 });

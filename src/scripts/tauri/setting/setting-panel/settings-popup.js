@@ -5,11 +5,15 @@ import {
     setDataRoot,
     updateTauriTavernSettings,
 } from '../../../../tauri-bridge.js';
-import { runTaskOrPopup } from './popup-utils.js';
-import { loadTauriTavernSettingsViewModel } from './settings-view-model.js';
+import { runTaskOrPopup, showErrorPopup } from './popup-utils.js';
+import {
+    loadChatBackupStorageStats,
+    loadTauriTavernSettingsViewModel,
+} from './settings-view-model.js';
 import { buildTauriTavernSettingsUpdate } from './settings-patch.js';
 import { applyTauriTavernSettingsUpdateEffects } from './settings-effects.js';
 import { callTauriTavernPanelPopup } from '../panel-popup.js';
+import { setOledBackgroundEnabled } from '../oled-background.js';
 
 const SETTINGS_STYLE_ID = 'tauritavern-settings-style';
 
@@ -31,11 +35,47 @@ const HELP_TOPICS = {
             'Embedded Runtime help: saver',
         ],
     },
-    chatHistory: {
-        title: 'Chat History',
+    chatVirtualization: {
+        title: 'Chat DOM Virtualization',
         lines: [
-            'Chat History help: windowed',
-            'Chat History help: off',
+            'Chat DOM virtualization fully solves the performance problems caused by rendering many messages in very long chats.',
+            'When enabled, only messages near the viewport and the newest message stay mounted. Turn it off to use upstream SillyTavern chat rendering. Renderer extensions must support ChatSurface.',
+        ],
+    },
+    coldSwipes: {
+        title: 'Load historical swipes on demand',
+        lines: [
+            'Reduces memory use by loading alternate swipes of older messages only when needed. Opening a chat loads current text and all swipes of the last message.',
+            'Only affects display, not saving or exporting. Requires reload to apply.',
+        ],
+    },
+    codeMirrorEditor: {
+        title: 'CodeMirror Editor',
+        lines: [
+            'When enabled, supported textareas in Preset, World Info, Regex, and Quick Reply editors use CodeMirror. The editor bundle is loaded only when needed.',
+            "Text is synchronized at each feature's existing save or update boundary, reducing full-text copies while typing.",
+            'Some textarea-specific features, including macro autocomplete and Markdown shortcuts, are not available in CodeMirror.',
+            'Requires reload to apply.',
+        ],
+    },
+    automaticChatBackups: {
+        title: 'Automatic Chat Backups',
+        lines: [
+            'Create a backup automatically when an eligible chat save completes.',
+        ],
+    },
+    zstdCompression: {
+        title: 'zstd Compression',
+        lines: [
+            'zstd compression applies to all chat backups.',
+            'When this setting changes, existing backups are converted in the background.',
+            'TauriTavern can read zstd backups directly. SillyTavern does not support this backup format.',
+        ],
+    },
+    backupsPerCharacterOrGroup: {
+        title: 'Backups per character or group',
+        lines: [
+            'Maximum backups sharing the same character or group name.',
         ],
     },
     closeToTray: {
@@ -64,6 +104,12 @@ const HELP_TOPICS = {
         lines: [
             'Character/User avatar originals help: on',
             'Character/User avatar originals help: off',
+        ],
+    },
+    oledBackground: {
+        title: 'OLED Pure Black Background',
+        lines: [
+            'Use pure black backgrounds and hide wallpaper on this device, keeping theme text and accent colors.',
         ],
     },
     dynamicTheme: {
@@ -103,12 +149,15 @@ function readThemeOptions() {
     }));
 }
 
-function getBackgroundThumbnailUrl(filename) {
-    if (typeof window.__TAURITAVERN_THUMBNAIL__ === 'function') {
-        return window.__TAURITAVERN_THUMBNAIL__('bg', filename);
+function getBackgroundThumbnailUrl(filename, isAnimated) {
+    if (filename.toLowerCase().endsWith('.mp4')) {
+        return '/img/No-Image-Placeholder.svg';
     }
 
-    return `/thumbnail?type=bg&file=${encodeURIComponent(filename)}`;
+    const url = typeof window.__TAURITAVERN_THUMBNAIL__ === 'function'
+        ? window.__TAURITAVERN_THUMBNAIL__('bg', filename)
+        : `/thumbnail?type=bg&file=${encodeURIComponent(filename)}`;
+    return isAnimated ? `${url}&static=true` : url;
 }
 
 async function readBackgroundOptions() {
@@ -124,7 +173,7 @@ async function readBackgroundOptions() {
         backgroundOptions: backgroundEntries.map((entry) => ({
             value: entry.filename,
             label: entry.filename,
-            thumbnailUrl: getBackgroundThumbnailUrl(entry.filename),
+            thumbnailUrl: getBackgroundThumbnailUrl(entry.filename, entry.isAnimated),
             isAnimated: entry.isAnimated,
         })),
     };
@@ -227,6 +276,65 @@ async function showHelpTopic(topicId) {
     });
 }
 
+async function showChatVirtualizationCompatibility() {
+    const content = createPopupColumn();
+    const title = document.createElement('b');
+    title.textContent = translate('ChatSurface renderer requirements');
+    const explanation = document.createElement('div');
+    explanation.textContent = translate(
+        'Chat DOM Virtualization requires renderer extensions that support ChatSurface. Use the official versions listed below or later:',
+    );
+    content.append(title, explanation);
+
+    for (const [labelKey, repository, href] of [
+        ['JS-Slash-Runner 4.9.1 or later:', 'N0VI028/JS-Slash-Runner', 'https://github.com/N0VI028/JS-Slash-Runner'],
+        ['LittleWhiteBox 3.0.4 or later:', 'RT15548/LittleWhiteBox', 'https://github.com/RT15548/LittleWhiteBox'],
+    ]) {
+        const line = document.createElement('div');
+        const link = document.createElement('a');
+        link.href = href;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = repository;
+        line.append(`${translate(labelKey)} `, link);
+        content.appendChild(line);
+    }
+
+    const repositoryNotice = document.createElement('div');
+    repositoryNotice.textContent = translate(
+        'If an extension was installed from another repository, reinstall it from the official repository to receive upstream updates.',
+    );
+    content.appendChild(repositoryNotice);
+
+    await callGenericPopup(content, POPUP_TYPE.TEXT, '', {
+        okButton: translate('Close'),
+        allowVerticalScrolling: true,
+        wide: false,
+        large: false,
+    });
+}
+
+async function confirmChatBackupHistoryPurge() {
+    const content = createPopupColumn();
+    const title = document.createElement('b');
+    title.textContent = translate('Disable chat backup history?');
+    const explanation = document.createElement('div');
+    explanation.textContent = translate(
+        'Setting any chat backup limit to 0 deletes all existing chat backups in the background. This cannot be undone.',
+    );
+    content.append(title, explanation);
+
+    const result = await callGenericPopup(content, POPUP_TYPE.CONFIRM, '', {
+        okButton: translate('Disable and delete backups'),
+        cancelButton: translate('Cancel'),
+        allowVerticalScrolling: true,
+        wide: false,
+        large: false,
+    });
+
+    return result === POPUP_RESULT.AFFIRMATIVE;
+}
+
 async function chooseDataRoot() {
     const picked = await openDialog({
         directory: true,
@@ -279,6 +387,10 @@ function createSettingsActions(backgroundOptions) {
         chooseDataRoot: () => runTaskOrPopup(chooseDataRoot),
         chooseWallpaper: (request) => runTaskOrPopup(() => chooseWallpaper(backgroundOptions, request)),
         showHelp: (topicId) => runTaskOrPopup(() => showHelpTopic(topicId)),
+        manageQuickAccess: () => runTaskOrPopup(async () => {
+            const { openExtensionMenuShortcutsManager } = await import('../extension-menu-shortcuts.js');
+            await openExtensionMenuShortcutsManager();
+        }),
         reloadFrontend: () => runTaskOrPopup(async () => {
             window.location.reload();
         }),
@@ -319,28 +431,72 @@ export async function openTauriTavernSettingsPopup() {
         actions: createSettingsActions(backgroundModel.backgroundOptions),
         tr: translate,
     });
+    let savedUpdate = null;
 
     try {
-        const result = await callTauriTavernPanelPopup(mount, POPUP_TYPE.CONFIRM, '', {
+        const popupPromise = callTauriTavernPanelPopup(mount, POPUP_TYPE.CONFIRM, '', {
             okButton: translate('Save'),
             cancelButton: translate('Close'),
             allowVerticalScrolling: true,
             wider: true,
             wide: false,
             large: false,
+            onClosing: async (popup) => {
+                if (popup.result !== POPUP_RESULT.AFFIRMATIVE) {
+                    return true;
+                }
+
+                try {
+                    const draft = appHandle.getDraft();
+                    const update = buildTauriTavernSettingsUpdate(viewModel.values, draft);
+
+                    if (
+                        update.requiresChatBackupPurgeConfirmation
+                        && !await confirmChatBackupHistoryPurge()
+                    ) {
+                        return false;
+                    }
+
+                    if (
+                        update.changes.chatVirtualizationEnabled
+                        && update.next.chatVirtualizationEnabled
+                    ) {
+                        await showChatVirtualizationCompatibility();
+                    }
+
+                    if (update.hasChanges) {
+                        const updatedSettings = await updateTauriTavernSettings(update.patch);
+                        savedUpdate = { update, updatedSettings };
+                    }
+
+                    if (draft.oledBackgroundEnabled !== viewModel.values.oledBackgroundEnabled) {
+                        try {
+                            setOledBackgroundEnabled(draft.oledBackgroundEnabled);
+                        } catch (error) {
+                            console.warn('Could not save OLED background setting:', error);
+                            toastr.warning(translate('Could not save OLED background setting.'));
+                        }
+                    }
+                    return true;
+                } catch (error) {
+                    await showErrorPopup(error);
+                    return false;
+                }
+            },
         });
+        if (viewModel.values.chatBackups.zstdCompressionEnabled) {
+            void loadChatBackupStorageStats()
+                .then(appHandle.setChatBackupStorageStats)
+                .catch(error => console.warn('Chat backup storage stats are unavailable:', error));
+        }
 
-        if (result !== POPUP_RESULT.AFFIRMATIVE) {
+        const result = await popupPromise;
+
+        if (result !== POPUP_RESULT.AFFIRMATIVE || !savedUpdate) {
             return;
         }
 
-        const update = buildTauriTavernSettingsUpdate(viewModel.values, appHandle.getDraft());
-        if (!update.hasChanges) {
-            return;
-        }
-
-        const updatedSettings = await updateTauriTavernSettings(update.patch);
-        applyTauriTavernSettingsUpdateEffects(update, updatedSettings);
+        applyTauriTavernSettingsUpdateEffects(savedUpdate.update, savedUpdate.updatedSettings);
     } finally {
         appHandle.unmount();
     }

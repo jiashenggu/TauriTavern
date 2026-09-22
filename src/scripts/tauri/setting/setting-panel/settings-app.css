@@ -59,6 +59,11 @@
     min-height: 34px;
 }
 
+/* Long hints read better spanning the full row below label and control. */
+.tt-settings-row > .tt-settings-hint {
+    grid-column: 1 / -1;
+}
+
 .tt-settings-row-copy {
     display: flex;
     flex-direction: column;
@@ -84,6 +89,10 @@
     opacity: 0.82;
 }
 
+.tt-settings-hint-accent {
+    color: var(--SmartThemeQuoteColor);
+}
+
 .tt-settings-status {
     white-space: pre-wrap;
 }
@@ -100,6 +109,24 @@
     width: 100%;
     min-width: 0;
     margin: 0;
+}
+
+.tt-settings-select:disabled {
+    cursor: not-allowed;
+    opacity: 0.64;
+}
+
+.tt-settings-number-with-unit {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(82px, 0.34fr);
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+}
+
+.tt-settings-warning {
+    color: var(--fullred);
+    font-weight: 600;
 }
 
 .tt-settings-switch {
@@ -177,7 +204,7 @@
 }
 
 .tt-settings-disclosure {
-    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 74%, transparent);
+    border: 0;
     border-radius: 8px;
     background: var(--black10a);
 }
@@ -187,7 +214,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 8px 10px;
+    padding: 8px 0;
     cursor: pointer;
     user-select: none;
 }
@@ -231,7 +258,7 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
-    padding: 0 10px 10px;
+    padding: 0 0 10px;
 }
 
 .tt-settings-path-row {

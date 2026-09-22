@@ -4,13 +4,16 @@ import {
     normalizeEmbeddedRuntimeProfileName,
     resolveEffectiveEmbeddedRuntimeProfileName,
 } from '../../../../tauri/main/services/embedded-runtime/embedded-runtime-profile-state.js';
-import {
-    CHAT_HISTORY_MODE_WINDOWED,
-    normalizeChatHistoryModeName,
-} from '../../../../tauri/main/services/chat-history/chat-history-mode-state.js';
-import { readNativeRegexBackendEnabledFromSettings } from '../../regex/native-regex-settings.js';
 
 export const PROMPT_CACHE_TTL_VALUES = ['off', '5m', '1h'];
+
+function requireChatBackupLimit(value, field) {
+    if (!Number.isSafeInteger(value) || value < -1) {
+        throw new Error(`TauriTavern settings: invalid chat backup ${field}`);
+    }
+
+    return value;
+}
 
 /**
  * @param {unknown} value
@@ -47,9 +50,8 @@ export function arraysEqual(left, right) {
 
 /**
  * @param {Record<string, any>} settings
- * @param {{ nativeRegexBackendEnabled?: boolean }} [options]
  */
-export function createTauriTavernSettingsState(settings, options = {}) {
+export function createTauriTavernSettingsState(settings) {
     const rawPanelRuntimeProfile = settings.panel_runtime_profile;
     const panelRuntimeProfile = typeof rawPanelRuntimeProfile === 'string' && rawPanelRuntimeProfile
         ? rawPanelRuntimeProfile
@@ -57,12 +59,15 @@ export function createTauriTavernSettingsState(settings, options = {}) {
 
     const configuredEmbeddedRuntimeProfile = normalizeEmbeddedRuntimeProfileName(settings.embedded_runtime_profile);
     const embeddedRuntimeProfile = resolveEffectiveEmbeddedRuntimeProfileName(configuredEmbeddedRuntimeProfile);
+    const chatVirtualizationEnabled = settings.chat_virtualization_enabled;
+    if (typeof chatVirtualizationEnabled !== 'boolean') {
+        throw new Error('TauriTavern settings: chat virtualization setting missing');
+    }
 
-    const chatHistoryMode = normalizeChatHistoryModeName(
-        typeof settings.chat_history_mode === 'string' && settings.chat_history_mode
-            ? settings.chat_history_mode
-            : CHAT_HISTORY_MODE_WINDOWED,
-    );
+    const codeMirrorEditorEnabled = settings.codemirror_editor_enabled;
+    if (typeof codeMirrorEditorEnabled !== 'boolean') {
+        throw new Error('TauriTavern settings: CodeMirror editor setting missing');
+    }
 
     const avatarPersonaOriginalImagesEnabled = settings.avatar_persona_original_images_enabled;
     if (typeof avatarPersonaOriginalImagesEnabled !== 'boolean') {
@@ -74,6 +79,24 @@ export function createTauriTavernSettingsState(settings, options = {}) {
         throw new Error('TauriTavern settings: dynamic theme settings missing');
     }
 
+    const chatBackups = settings.chat_backups;
+    if (!chatBackups || typeof chatBackups !== 'object') {
+        throw new Error('TauriTavern settings: chat backup settings missing');
+    }
+    if (typeof chatBackups.automatic_enabled !== 'boolean') {
+        throw new Error('TauriTavern settings: automatic chat backup setting missing');
+    }
+    if (typeof chatBackups.zstd_compression_enabled !== 'boolean') {
+        throw new Error('TauriTavern settings: Zstandard chat backup setting missing');
+    }
+
+    const maxFilesPerPrefix = requireChatBackupLimit(
+        chatBackups.max_files_per_prefix,
+        'per-character file limit',
+    );
+    const maxTotalFiles = requireChatBackupLimit(chatBackups.max_total_files, 'total file limit');
+    const maxTotalBytes = requireChatBackupLimit(chatBackups.max_total_bytes, 'storage limit');
+
     const rawPromptCacheTtl = typeof settings.models?.claude?.prompt_cache_ttl === 'string'
         ? settings.models.claude.prompt_cache_ttl
         : 'off';
@@ -83,7 +106,16 @@ export function createTauriTavernSettingsState(settings, options = {}) {
         panelRuntimeProfileSource: rawPanelRuntimeProfile,
         configuredEmbeddedRuntimeProfile,
         embeddedRuntimeProfile,
-        chatHistoryMode,
+        chatVirtualizationEnabled,
+        coldSwipesEnabled: settings.cold_swipes_enabled,
+        codeMirrorEditorEnabled,
+        chatBackups: {
+            automaticEnabled: chatBackups.automatic_enabled,
+            zstdCompressionEnabled: chatBackups.zstd_compression_enabled,
+            maxFilesPerPrefix,
+            maxTotalFiles,
+            maxTotalBytes,
+        },
         closeToTrayOnClose: Boolean(settings.close_to_tray_on_close),
         requestProxy: {
             enabled: Boolean(settings.request_proxy?.enabled),
@@ -92,9 +124,6 @@ export function createTauriTavernSettingsState(settings, options = {}) {
         },
         allowKeysExposure: Boolean(settings.allow_keys_exposure),
         avatarPersonaOriginalImagesEnabled,
-        nativeRegexBackendEnabled: typeof options.nativeRegexBackendEnabled === 'boolean'
-            ? options.nativeRegexBackendEnabled
-            : readNativeRegexBackendEnabledFromSettings(settings),
         dynamicTheme: {
             themeEnabled: Boolean(dynamicTheme.enabled),
             dayTheme: String(dynamicTheme.day_theme || '').trim(),

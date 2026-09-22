@@ -16,6 +16,8 @@ import libCoreBundle, {
     css,
     Bowser,
     DiffMatchPatch,
+    Readability,
+    isProbablyReaderable,
     SVGInject,
     showdown,
     moment,
@@ -23,10 +25,16 @@ import libCoreBundle, {
     Popper,
     droll,
     morphdom,
+    chalk,
+    yaml,
     chevrotain,
     gzipSync,
     gzip,
     sha256,
+    Virtualizer,
+    defaultRangeExtractor,
+    observeElementOffset,
+    observeElementRect,
 } from './dist/lib.core.bundle.js';
 
 let optionalBundlePromise = null;
@@ -57,9 +65,8 @@ export async function getHljs() {
     return hljs;
 }
 
-export async function getReadability() {
-    const { Readability, isProbablyReaderable } = await loadOptionalBundle();
-    return { Readability, isProbablyReaderable };
+export function getCodeMirrorEditor() {
+    return import('./dist/lib.editor.bundle.js');
 }
 
 /**
@@ -176,6 +183,8 @@ export {
     css,
     Bowser,
     DiffMatchPatch,
+    Readability,
+    isProbablyReaderable,
     SVGInject,
     showdown,
     moment,
@@ -183,10 +192,16 @@ export {
     Popper,
     droll,
     morphdom,
+    chalk,
+    yaml,
     chevrotain,
     gzipSync,
     gzip,
     sha256,
+    Virtualizer,
+    defaultRangeExtractor,
+    observeElementOffset,
+    observeElementRect,
 };
 
 export default libCoreBundle;

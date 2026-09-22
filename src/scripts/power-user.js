@@ -13,10 +13,8 @@ import {
     getCurrentChatId,
     printCharactersDebounced,
     setCharacterId,
-    setEditedMessageId,
     chat,
     getFirstDisplayedMessageId,
-    showMoreMessages,
     saveSettings,
     saveChatConditional,
     setAnimationDuration,
@@ -29,12 +27,16 @@ import {
     messageFormatting,
     deleteMessage,
     settingsReady,
+    chat_metadata,
+    this_chid,
+    saveMetadata,
 } from '../script.js';
 import { extension_prompt_roles, extension_prompt_types } from './extension-prompts.js';
 import { isMobile, initMovingUI, favsToHotswap } from './RossAscends-mods.js';
 import {
     groups,
     resetSelectedGroup,
+    selected_group,
 } from './group-chats.js';
 import {
     instruct_presets,
@@ -68,6 +70,10 @@ import { IMAGE_OVERSWIPE, MEDIA_DISPLAY } from './constants.js';
 import { t } from './i18n.js';
 import { extractDominantColor, generateThemePalette, deriveBackgroundName } from './util/ThemeGenerator.js';
 import { getBackgroundPath, isCustomBackgroundUrl } from './backgrounds.js';
+import { CHAT_LAYOUT_CHANGED_EVENT } from '../tauri/main/services/chat-surface/install.js';
+import { resolveThemeBinding } from './theme-binding-policy.js';
+
+export { CHAT_LAYOUT_CHANGED_EVENT };
 
 export const toastPositionClasses = [
     'toast-top-left',
@@ -91,6 +97,10 @@ const defaultExampleSeparator = '***';
 const defaultChatStart = '***';
 const defaultToastPosition = 'toast-top-center';
 const MOBILE_PORTRAIT_CHAT_WIDTH_VW = 100;
+
+function notifyChatLayoutChanged() {
+    window.dispatchEvent(new Event(CHAT_LAYOUT_CHANGED_EVENT));
+}
 
 const avatar_styles = {
     ROUND: 0,
@@ -186,6 +196,13 @@ export const power_user = {
     movingUIPreset: '',
     noShadows: false,
     theme: 'Default (Dark) 1.7.1',
+    theme_fallback: 'Default (Dark) 1.7.1',
+    theme_bindings: {
+        /** @type {Record<string, string>} */
+        characters: {},
+        /** @type {Record<string, string>} */
+        groups: {},
+    },
 
     gestures: true,
     auto_swipe: false,
@@ -194,6 +211,7 @@ export const power_user = {
     auto_swipe_blacklist_threshold: 2,
     auto_scroll_chat_to_bottom: true,
     auto_fix_generated_markdown: true,
+    spellcheck_enabled: true,
     send_on_enter: send_on_enter_options.AUTO,
     console_log_prompts: false,
     request_token_probabilities: false,
@@ -208,6 +226,9 @@ export const power_user = {
     hideChatAvatars_enabled: false,
     max_context_unlocked: false,
     message_token_count_enabled: false,
+    message_ttft_enabled: false,
+    message_token_rate_enabled: false,
+    message_cache_enabled: false,
     expand_message_actions: false,
     enableZenSliders: false,
     enableLabMode: false,
@@ -491,32 +512,48 @@ function switchTimer() {
 function switchTimestamps() {
     $('body').toggleClass('no-timestamps', !power_user.timestamps_enabled);
     $('#messageTimestampsEnabled').prop('checked', power_user.timestamps_enabled);
+    notifyChatLayoutChanged();
 }
 
 function switchIcons() {
     $('body').toggleClass('no-modelIcons', !power_user.timestamp_model_icon);
     $('#messageModelIconEnabled').prop('checked', power_user.timestamp_model_icon);
+    notifyChatLayoutChanged();
 }
 
 function switchTokenCount() {
     $('body').toggleClass('no-tokenCount', !power_user.message_token_count_enabled);
     $('#messageTokensEnabled').prop('checked', power_user.message_token_count_enabled);
+    notifyChatLayoutChanged();
+}
+
+function switchGenerationInfo() {
+    $('body').toggleClass('no-message-ttft', !power_user.message_ttft_enabled);
+    $('body').toggleClass('no-message-token-rate', !power_user.message_token_rate_enabled);
+    $('body').toggleClass('no-message-cache', !power_user.message_cache_enabled);
+    $('#messageFirstTokenEnabled').prop('checked', power_user.message_ttft_enabled);
+    $('#messageTokenRateEnabled').prop('checked', power_user.message_token_rate_enabled);
+    $('#messageCacheEnabled').prop('checked', power_user.message_cache_enabled);
+    notifyChatLayoutChanged();
 }
 
 function switchMesIDDisplay() {
     $('body').toggleClass('no-mesIDDisplay', !power_user.mesIDDisplay_enabled);
     $('#mesIDDisplayEnabled').prop('checked', power_user.mesIDDisplay_enabled);
+    notifyChatLayoutChanged();
 }
 
 function switchHideChatAvatars() {
     $('body').toggleClass('hideChatAvatars', power_user.hideChatAvatars_enabled);
     $('#hideChatAvatarsEnabled').prop('checked', power_user.hideChatAvatars_enabled);
+    notifyChatLayoutChanged();
 }
 
 function switchMessageActions() {
     $('body').toggleClass('expandMessageActions', power_user.expand_message_actions);
     $('#expandMessageActions').prop('checked', power_user.expand_message_actions);
     $('.extraMesButtons, .extraMesButtonsHint').removeAttr('style');
+    notifyChatLayoutChanged();
 }
 
 function switchReducedMotion() {
@@ -1052,6 +1089,7 @@ function applyAvatarStyle() {
     $('body').toggleClass('square-avatars', power_user.avatar_style === avatar_styles.SQUARE);
     $('body').toggleClass('rounded-avatars', power_user.avatar_style === avatar_styles.ROUNDED);
     $('#avatar_style').val(power_user.avatar_style).prop('selected', true);
+    notifyChatLayoutChanged();
 }
 
 function applyChatDisplay() {
@@ -1082,6 +1120,7 @@ function applyChatDisplay() {
             break;
         }
     }
+    notifyChatLayoutChanged();
 }
 
 function applyToastrPosition() {
@@ -1114,6 +1153,7 @@ function applyChatWidth(type) {
         const rootStyle = document.documentElement.style;
         rootStyle.setProperty('--sheldWidth', `${effectiveChatWidth}vw`);
         //document.documentElement.style.setProperty('--sheldWidth', power_user.chat_width);
+        notifyChatLayoutChanged();
     } else {
         //this is to prevent the slider from updating page in real time
         chatWidthSlider.off('mouseup touchend').on('mouseup touchend', async () => {
@@ -1122,6 +1162,7 @@ function applyChatWidth(type) {
             await delay(1);
             document.documentElement.style.setProperty('--sheldWidth', `${getEffectiveChatWidth()}vw`);
             await delay(1);
+            notifyChatLayoutChanged();
         });
     }
 
@@ -1208,6 +1249,7 @@ function applyCustomCSS() {
         document.head.appendChild(style);
     }
     style.innerHTML = power_user.custom_css;
+    notifyChatLayoutChanged();
 }
 
 function applyBlurStrength() {
@@ -1227,10 +1269,12 @@ function applyFontScale(type) {
     //this is to allow forced setting on page load, theme swap, etc
     if (type === 'forced') {
         document.documentElement.style.setProperty('--fontScale', String(power_user.font_scale));
+        notifyChatLayoutChanged();
     } else {
         //this is to prevent the slider from updating page in real time
         $('#font_scale').off('mouseup touchend').on('mouseup touchend', () => {
             document.documentElement.style.setProperty('--fontScale', String(power_user.font_scale));
+            notifyChatLayoutChanged();
         });
     }
 
@@ -1279,10 +1323,10 @@ function showMediaDisplayReloadPrompt() {
 }
 
 function applyTheme(name) {
-    const theme = themes.find(x => x.name == name);
+    const theme = themes.find(x => x.name === name);
 
     if (!theme) {
-        return;
+        throw new Error(`Theme not found: ${name}`);
     }
 
     const themeProperties = [
@@ -1390,6 +1434,9 @@ function applyTheme(name) {
                 switchTokenCount();
             },
         },
+        { key: 'message_ttft_enabled', action: switchGenerationInfo },
+        { key: 'message_token_rate_enabled', action: switchGenerationInfo },
+        { key: 'message_cache_enabled', action: switchGenerationInfo },
         {
             key: 'mesIDDisplay_enabled',
             action: () => {
@@ -1494,6 +1541,205 @@ function applyTheme(name) {
     console.log('theme applied: ' + name);
 }
 
+function getCurrentThemeEntity() {
+    if (selected_group) {
+        return { scope: 'group', id: selected_group };
+    }
+
+    const avatar = characters[this_chid]?.avatar;
+    return avatar ? { scope: 'character', id: avatar } : null;
+}
+
+function getThemeEntityBindings(entity) {
+    return entity.scope === 'group' ? power_user.theme_bindings.groups : power_user.theme_bindings.characters;
+}
+
+function getThemeBindingCandidates() {
+    const candidates = [];
+
+    if (getCurrentChatId()) {
+        candidates.push({ scope: 'chat', name: chat_metadata.theme });
+    }
+
+    const entity = getCurrentThemeEntity();
+    if (entity) {
+        candidates.push({
+            scope: entity.scope,
+            name: getThemeEntityBindings(entity)[entity.id],
+        });
+    }
+
+    candidates.push({ scope: 'fallback', name: power_user.theme_fallback });
+    return candidates;
+}
+
+function updateThemeBindingControls() {
+    const entity = getCurrentThemeEntity();
+    const chatAvailable = Boolean(getCurrentChatId());
+    const entityTheme = entity ? getThemeEntityBindings(entity)[entity.id] : undefined;
+    const chatTheme = chatAvailable ? chat_metadata.theme : undefined;
+
+    const updateButton = (selector, enabled, boundTheme) => {
+        const isActive = enabled && boundTheme === power_user.theme;
+        const button = $(selector);
+        button.prop('disabled', !enabled);
+        button.attr('aria-disabled', String(!enabled));
+        button.attr('aria-pressed', String(isActive));
+        button.toggleClass('active', isActive);
+        button.find('.theme-binding-icon').toggleClass('fa-lock', isActive).toggleClass('fa-unlock', !isActive);
+    };
+
+    const entityLabel = selected_group ? 'Group' : 'Character';
+    $('#theme_bind_character_label')
+        .attr('data-i18n', entityLabel)
+        .text(selected_group ? t`Group` : t`Character`);
+    updateButton('#theme_bind_character', Boolean(entity), entityTheme);
+    updateButton('#theme_bind_chat', chatAvailable, chatTheme);
+}
+
+function activateTheme(name) {
+    applyTheme(name);
+    power_user.theme = name;
+    $('#themes').val(name);
+    updateThemeBindingControls();
+}
+
+function selectTheme(name) {
+    activateTheme(name);
+    power_user.theme_fallback = name;
+    saveSettingsDebounced();
+}
+
+function applyThemeForCurrentContext() {
+    const resolution = resolveThemeBinding(getThemeBindingCandidates(), themes.map(theme => theme.name));
+
+    if (resolution.missing.length > 0) {
+        console.error('Theme binding targets not found', resolution.missing);
+        toastr.error(
+            t`A selected or bound theme is unavailable. Check the console for details.`,
+            t`Theme Binding`,
+        );
+    }
+
+    if (!resolution.selected) {
+        throw new Error('No available theme for the current context');
+    }
+
+    if (power_user.theme !== resolution.selected.name) {
+        activateTheme(resolution.selected.name);
+    } else {
+        $('#themes').val(resolution.selected.name);
+        updateThemeBindingControls();
+    }
+    return resolution.selected.name;
+}
+
+export function applyGlobalTheme(name) {
+    if (!themes.some(theme => theme.name === name)) {
+        throw new Error(`Theme not found: ${name}`);
+    }
+
+    const fallbackChanged = power_user.theme_fallback !== name;
+    power_user.theme_fallback = name;
+    applyThemeForCurrentContext();
+    if (fallbackChanged) {
+        saveSettingsDebounced();
+    }
+}
+
+async function toggleThemeBinding(scope) {
+    const entity = getCurrentThemeEntity();
+    const chatAvailable = Boolean(getCurrentChatId());
+    let bindingOwner;
+    let bindingKey;
+
+    if (scope === 'chat' && chatAvailable) {
+        bindingOwner = chat_metadata;
+        bindingKey = 'theme';
+    } else if (scope === 'entity' && entity) {
+        bindingOwner = getThemeEntityBindings(entity);
+        bindingKey = entity.id;
+    } else {
+        toastr.warning(t`No binding target is selected.`, t`Theme Binding`);
+        return;
+    }
+
+    const themeName = power_user.theme;
+    if (!themes.some(theme => theme.name === themeName)) {
+        toastr.error(t`The current theme is unavailable.`, t`Theme Binding`);
+        return;
+    }
+
+    const previousTheme = bindingOwner[bindingKey];
+    const removing = previousTheme === themeName;
+    if (removing) {
+        delete bindingOwner[bindingKey];
+    } else {
+        bindingOwner[bindingKey] = themeName;
+    }
+    updateThemeBindingControls();
+
+    try {
+        if (scope === 'chat') {
+            await saveMetadata();
+        } else if (!await saveSettings()) {
+            throw new Error('Settings save failed');
+        }
+    } catch (error) {
+        if (previousTheme === undefined) {
+            delete bindingOwner[bindingKey];
+        } else {
+            bindingOwner[bindingKey] = previousTheme;
+        }
+        updateThemeBindingControls();
+        console.error('Theme binding could not be saved', error);
+        toastr.error(t`Could not save the theme binding.`, t`Theme Binding`);
+        return;
+    }
+
+    try {
+        applyThemeForCurrentContext();
+    } catch (error) {
+        console.error('Theme binding was saved but could not be applied', error);
+    }
+    updateThemeBindingControls();
+    toastr[removing ? 'info' : 'success'](
+        removing ? t`Theme binding removed.` : t`Current theme bound.`,
+        t`Theme Binding`,
+    );
+}
+
+function migrateCharacterThemeBinding(oldAvatar, newAvatar) {
+    const bindings = power_user.theme_bindings.characters;
+    if (!Object.hasOwn(bindings, oldAvatar)) {
+        return;
+    }
+
+    bindings[newAvatar] = bindings[oldAvatar];
+    delete bindings[oldAvatar];
+    saveSettingsDebounced();
+    updateThemeBindingControls();
+}
+
+function removeCharacterThemeBinding({ character }) {
+    const avatar = character?.avatar;
+    if (!avatar || !Object.hasOwn(power_user.theme_bindings.characters, avatar)) {
+        return;
+    }
+
+    delete power_user.theme_bindings.characters[avatar];
+    saveSettingsDebounced();
+    updateThemeBindingControls();
+}
+
+function syncThemeForCurrentContext() {
+    try {
+        applyThemeForCurrentContext();
+    } catch (error) {
+        console.error('Failed to apply the theme for the current context', error);
+    }
+}
+
 async function applyMovingUIPreset(name) {
     await resetMovablePanels('quiet');
     const movingUIPreset = movingUIPresets.find(x => x.name == name);
@@ -1539,6 +1785,7 @@ export function applyPowerUserSettings() {
     applyNoShadows();
     switchHotswap();
     switchTimer();
+    switchGenerationInfo();
     switchTimestamps();
     switchIcons();
     switchMesIDDisplay();
@@ -1609,6 +1856,7 @@ export async function loadPowerUserSettings(settings, data) {
     const defaultStscript = JSON.parse(JSON.stringify(power_user.stscript));
     // Load from settings.json
     if (settings.power_user !== undefined) {
+        const hasThemeFallback = Object.hasOwn(settings.power_user, 'theme_fallback');
         // Migrate old preference to a new setting
         if (settings.power_user.click_to_edit === undefined && settings.power_user.chat_display === chat_styles.DOCUMENT) {
             settings.power_user.click_to_edit = true;
@@ -1618,6 +1866,9 @@ export async function loadPowerUserSettings(settings, data) {
             delete settings.power_user.auto_sort_tags;
         }
         Object.assign(power_user, settings.power_user);
+        if (!hasThemeFallback) {
+            power_user.theme_fallback = power_user.theme;
+        }
     }
 
     if (power_user.stscript === undefined) {
@@ -1737,6 +1988,8 @@ export async function loadPowerUserSettings(settings, data) {
     $('#show_group_chat_queue').prop('checked', power_user.show_group_chat_queue);
     $('#auto_fix_generated_markdown').prop('checked', power_user.auto_fix_generated_markdown);
     $('#auto_scroll_chat_to_bottom').prop('checked', power_user.auto_scroll_chat_to_bottom);
+    $('#spellcheck_enabled').prop('checked', power_user.spellcheck_enabled);
+    document.body.spellcheck = power_user.spellcheck_enabled;
     $('#bogus_folders').prop('checked', power_user.bogus_folders);
     $('#zoomed_avatar_magnification').prop('checked', power_user.zoomed_avatar_magnification);
     $(`#tokenizer option[value="${power_user.tokenizer}"]`).prop('selected', true);
@@ -2535,6 +2788,13 @@ async function updateTheme() {
     toastr.success('Theme saved.');
 }
 
+async function saveThemeAs() {
+    const theme = await saveTheme();
+    if (theme) {
+        selectTheme(theme.name);
+    }
+}
+
 async function deleteTheme() {
     const themeName = power_user.theme;
 
@@ -2566,11 +2826,17 @@ async function deleteTheme() {
     if (themeIndex !== -1) {
         themes.splice(themeIndex, 1);
         $(`#themes option[value="${themeName}"]`).remove();
-        power_user.theme = themes[0]?.name;
-        saveSettingsDebounced();
-        if (power_user.theme) {
-            applyTheme(power_user.theme);
+        if (power_user.theme_fallback === themeName) {
+            power_user.theme_fallback = themes[0]?.name ?? '';
         }
+        if (themes.length > 0) {
+            applyThemeForCurrentContext();
+        } else {
+            power_user.theme = '';
+            $('#themes').val('');
+            updateThemeBindingControls();
+        }
+        saveSettingsDebounced();
         toastr.success('Theme deleted.');
     }
 }
@@ -2613,14 +2879,7 @@ async function importTheme(file) {
         }
     }
 
-    themes.push(parsed);
     await saveTheme(parsed.name, getNewTheme(parsed));
-    const option = document.createElement('option');
-    option.selected = false;
-    option.value = parsed.name;
-    option.innerText = parsed.name;
-    $('#themes').append(option);
-    saveSettingsDebounced();
     toastr.success(parsed.name, 'Theme imported');
 }
 
@@ -2628,7 +2887,7 @@ async function importTheme(file) {
  * Saves the current theme to the server.
  * @param {string|undefined} name Theme name. If undefined, a popup will be shown to enter a name.
  * @param {object|undefined} theme Theme object. If undefined, the current theme will be saved.
- * @returns {Promise<object>} A promise that resolves when the theme is saved.
+ * @returns {Promise<object|undefined>} A promise that resolves when the theme is saved, or undefined when cancelled.
  */
 async function saveTheme(name = undefined, theme = undefined) {
     if (typeof name !== 'string') {
@@ -2662,18 +2921,14 @@ async function saveTheme(name = undefined, theme = undefined) {
     if (themeIndex == -1) {
         themes.push(theme);
         const option = document.createElement('option');
-        option.selected = true;
+        option.selected = false;
         option.value = name;
         option.innerText = name;
         $('#themes').append(option);
     }
     else {
         themes[themeIndex] = theme;
-        $(`#themes option[value="${name}"]`).prop('selected', true);
     }
-
-    power_user.theme = name;
-    saveSettingsDebounced();
 
     return theme;
 }
@@ -2713,6 +2968,9 @@ export function getThemeObject(name) {
         mesIDDisplay_enabled: power_user.mesIDDisplay_enabled,
         hideChatAvatars_enabled: power_user.hideChatAvatars_enabled,
         message_token_count_enabled: power_user.message_token_count_enabled,
+        message_ttft_enabled: power_user.message_ttft_enabled,
+        message_token_rate_enabled: power_user.message_token_rate_enabled,
+        message_cache_enabled: power_user.message_cache_enabled,
         expand_message_actions: power_user.expand_message_actions,
         enableZenSliders: power_user.enableZenSliders,
         enableLabMode: power_user.enableLabMode,
@@ -2944,32 +3202,6 @@ async function doRandomChat(_, tagName) {
     return characters[characterId]?.name;
 }
 
-/**
- * Loads the chat until the given message ID is displayed.
- * @param {number} mesId
- * @returns JQuery<HTMLElement>
- */
-async function loadUntilMesId(mesId) {
-    let target;
-
-    while (getFirstDisplayedMessageId() > mesId && getFirstDisplayedMessageId() !== 0) {
-        await showMoreMessages();
-        await delay(1);
-        target = $('#chat').find(`.mes[mesid="${mesId}"]`);
-
-        if (target.length) {
-            break;
-        }
-    }
-
-    if (!target.length) {
-        toastr.error(`Could not find message with ID: ${mesId}`);
-        return target;
-    }
-
-    return target;
-}
-
 async function doMesCut(_, text) {
     console.debug(`was asked to cut message id #${text}`);
     const range = stringToRange(text, 0, chat.length - 1);
@@ -2980,23 +3212,12 @@ async function doMesCut(_, text) {
         return;
     }
 
-    let totalMesToCut = (range.end - range.start) + 1;
-    let mesIDToCut = range.start;
+    const totalMesToCut = (range.end - range.start) + 1;
+    const mesIDToCut = range.start;
     let cutText = '';
 
     for (let i = 0; i < totalMesToCut; i++) {
         cutText += (chat[mesIDToCut]?.mes || '') + '\n';
-        let mesToCut = $('#chat').find(`.mes[mesid=${mesIDToCut}]`);
-
-        if (!mesToCut.length) {
-            mesToCut = await loadUntilMesId(mesIDToCut);
-
-            if (!mesToCut || !mesToCut.length) {
-                return;
-            }
-        }
-
-        setEditedMessageId(mesIDToCut);
         await deleteMessage(mesIDToCut, null, false);
     }
 
@@ -3083,7 +3304,7 @@ async function setAvgBG(args) {
     Object.assign(theme, palette);
 
     await saveTheme(themeName, theme);
-    applyTheme(themeName);
+    selectTheme(themeName);
 
     toastr.success(`Theme "${themeName}" generated and applied.`);
     return '';
@@ -3112,10 +3333,7 @@ async function setThemeCallback(_, themeName) {
         return;
     }
 
-    power_user.theme = theme.name;
-    applyTheme(theme.name);
-    $('#themes').val(theme.name);
-    saveSettingsDebounced();
+    selectTheme(theme.name);
     return '';
 }
 
@@ -3663,10 +3881,15 @@ jQuery(() => {
 
     $('#themes').on('change', function () {
         const themeSelected = String($(this).find(':selected').val());
-        power_user.theme = themeSelected;
-        applyTheme(themeSelected);
-        saveSettingsDebounced();
+        selectTheme(themeSelected);
     });
+
+    $('#theme_bind_character').on('click', () => void toggleThemeBinding('entity'));
+    $('#theme_bind_chat').on('click', () => void toggleThemeBinding('chat'));
+    eventSource.on(event_types.APP_READY, syncThemeForCurrentContext);
+    eventSource.on(event_types.CHAT_CHANGED, syncThemeForCurrentContext);
+    eventSource.on(event_types.CHARACTER_RENAMED, migrateCharacterThemeBinding);
+    eventSource.on(event_types.CHARACTER_DELETED, removeCharacterThemeBinding);
 
     $('#movingUIPresets').on('change', async function () {
         console.log('saw MUI preset change');
@@ -3676,7 +3899,7 @@ jQuery(() => {
         saveSettingsDebounced();
     });
 
-    $('#ui-preset-save-button').on('click', () => saveTheme());
+    $('#ui-preset-save-button').on('click', () => saveThemeAs());
     $('#ui-preset-update-button').on('click', () => updateTheme());
     $('#ui-preset-delete-button').on('click', () => deleteTheme());
     $('#movingui-preset-save-button').on('click', saveMovingUI);
@@ -3780,6 +4003,12 @@ jQuery(() => {
         saveSettingsDebounced();
     });
 
+    $('#spellcheck_enabled').on('input', function () {
+        power_user.spellcheck_enabled = !!$(this).prop('checked');
+        document.body.spellcheck = power_user.spellcheck_enabled;
+        saveSettingsDebounced();
+    });
+
     $('#tokenizer').on('change', function () {
         const value = $(this).find(':selected').val();
         power_user.tokenizer = Number(value);
@@ -3852,6 +4081,12 @@ jQuery(() => {
         const value = !!$(this).prop('checked');
         power_user.message_token_count_enabled = value;
         switchTokenCount();
+        saveSettingsDebounced();
+    });
+
+    $('#messageFirstTokenEnabled, #messageTokenRateEnabled, #messageCacheEnabled').on('input', function () {
+        power_user[this.dataset.setting] = this.checked;
+        switchGenerationInfo();
         saveSettingsDebounced();
     });
 

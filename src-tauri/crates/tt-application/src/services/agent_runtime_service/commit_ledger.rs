@@ -1,0 +1,75 @@
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use tt_domain::models::agent::{AgentChatCommitMode, WorkspacePath};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommittedChatMessage {
+    path: String,
+    mode: AgentChatCommitMode,
+    message_id: Option<String>,
+    round: usize,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RunCommitLedger {
+    commits: Vec<CommittedChatMessage>,
+    explicit_count: usize,
+}
+
+impl RunCommitLedger {
+    pub(super) fn record(
+        &mut self,
+        path: &WorkspacePath,
+        mode: AgentChatCommitMode,
+        message_id: Option<String>,
+        round: usize,
+        is_explicit: bool,
+    ) {
+        self.explicit_count += usize::from(is_explicit);
+        self.commits.push(CommittedChatMessage {
+            path: path.as_str().to_string(),
+            mode,
+            message_id,
+            round,
+        });
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.commits.is_empty()
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.commits.len()
+    }
+
+    pub(super) fn explicit_count(&self) -> usize {
+        self.explicit_count
+    }
+
+    pub(super) fn has_explicit_commit(&self) -> bool {
+        self.explicit_count() > 0
+    }
+
+    pub(super) fn latest_message_id(&self) -> Option<&str> {
+        self.commits
+            .last()
+            .and_then(|message| message.message_id.as_deref())
+    }
+
+    pub(super) fn preserved_commits(&self) -> Vec<Value> {
+        self.commits
+            .iter()
+            .map(|message| {
+                json!({
+                    "path": message.path.as_str(),
+                    "mode": message.mode,
+                    "messageId": message.message_id.as_deref(),
+                    "round": message.round,
+                })
+            })
+            .collect()
+    }
+}

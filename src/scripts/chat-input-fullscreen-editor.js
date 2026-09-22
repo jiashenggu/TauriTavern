@@ -1,3 +1,5 @@
+import { getMountedCodeMirrorEditor, mountCodeMirrorEditor } from './tauri/codemirror-editor.js';
+
 const EXPAND_BUTTON_ID = 'send_textarea_expand';
 const EDITOR_DIALOG_ID = 'tt-chat-input-editor';
 const EDITOR_TITLE_ID = 'tt-chat-input-editor-title';
@@ -52,18 +54,23 @@ function createExpandButton(title) {
     return button;
 }
 
-function createInputShell(sourceTextarea) {
+function requireInputHost(sourceTextarea) {
     const nonQRFormItems = requireElement('nonQRFormItems', HTMLElement);
     if (sourceTextarea.parentElement !== nonQRFormItems) {
         throw new Error('Expected #send_textarea to be a direct child of #nonQRFormItems');
     }
 
-    const shell = document.createElement('div');
-    shell.className = 'tt-chat-input-shell';
-    sourceTextarea.before(shell);
-    shell.appendChild(sourceTextarea);
+    return nonQRFormItems;
+}
 
-    return shell;
+function positionExpandButton(button, textarea, inputHost) {
+    const textareaRect = textarea.getBoundingClientRect();
+    const inputHostRect = inputHost.getBoundingClientRect();
+    const topOffset = Math.max(textareaRect.top - inputHostRect.top, 0);
+    const rightOffset = Math.max(inputHostRect.right - textareaRect.right, 0);
+
+    button.style.setProperty('--tt-chat-input-expand-top-offset', `${topOffset}px`);
+    button.style.setProperty('--tt-chat-input-expand-right-offset', `${rightOffset}px`);
 }
 
 function getTextareaContentMetrics(textarea) {
@@ -152,23 +159,27 @@ export function installChatInputFullscreenEditor({ sendTextArea, sendMessage, is
         throw new Error('isMobile must be a function');
     }
 
-    const inputShell = createInputShell(sendTextArea);
+    const inputHost = requireInputHost(sendTextArea);
     const expandButton = createExpandButton('Expand the editor');
     expandButton.id = EXPAND_BUTTON_ID;
     expandButton.hidden = true;
     expandButton.setAttribute('aria-controls', EDITOR_DIALOG_ID);
     expandButton.setAttribute('aria-haspopup', 'dialog');
-    inputShell.appendChild(expandButton);
+    inputHost.appendChild(expandButton);
 
     const { dialog, textarea, collapseButton, sendButton } = createEditorDialog(sendTextArea);
 
     let pendingButtonFrame = 0;
     let pendingSourceFocus = false;
     let closingReason = '';
+    let editorMount = null;
 
     const setExpandButtonVisible = (visible) => {
         expandButton.hidden = !visible;
-        inputShell.classList.toggle('tt-chat-input-shell--has-expand', visible);
+        sendTextArea.classList.toggle('tt-chat-input--has-expand', visible);
+        if (visible) {
+            positionExpandButton(expandButton, sendTextArea, inputHost);
+        }
     };
 
     const queueButtonVisibilityUpdate = () => {
@@ -184,12 +195,13 @@ export function installChatInputFullscreenEditor({ sendTextArea, sendMessage, is
     };
 
     const commitEditorValue = () => {
+        getMountedCodeMirrorEditor(textarea)?.flush({ selection: true });
         if (sendTextArea.value !== textarea.value) {
             sendTextArea.value = textarea.value;
             sendTextArea.dispatchEvent(new Event('input', { bubbles: true }));
         }
 
-        sendTextArea.setSelectionRange(textarea.selectionStart, textarea.selectionEnd);
+        sendTextArea.setSelectionRange(textarea.selectionStart, textarea.selectionEnd, textarea.selectionDirection);
         queueButtonVisibilityUpdate();
     };
 
@@ -200,6 +212,7 @@ export function installChatInputFullscreenEditor({ sendTextArea, sendMessage, is
 
         pendingSourceFocus = focusSource;
         closingReason = reason;
+        editorMount?.abort();
         dialog.close();
     };
 
@@ -209,7 +222,8 @@ export function installChatInputFullscreenEditor({ sendTextArea, sendMessage, is
         await sendMessage();
     };
 
-    const openEditor = () => {
+    const openEditor = async () => {
+        if (dialog.open) return;
         if (typeof dialog.showModal !== 'function') {
             throw new Error('HTML dialog modal API is required for the chat input fullscreen editor.');
         }
@@ -217,17 +231,19 @@ export function installChatInputFullscreenEditor({ sendTextArea, sendMessage, is
         textarea.value = sendTextArea.value;
         textarea.placeholder = sendTextArea.placeholder;
 
-        if (!dialog.open) {
-            dialog.showModal();
-        }
-
+        dialog.showModal();
         textarea.focus();
-        textarea.setSelectionRange(sendTextArea.selectionStart, sendTextArea.selectionEnd);
+        textarea.setSelectionRange(sendTextArea.selectionStart, sendTextArea.selectionEnd, sendTextArea.selectionDirection);
+        editorMount = new AbortController();
+        await mountCodeMirrorEditor(textarea, { signal: editorMount.signal });
     };
 
     expandButton.addEventListener('click', (event) => {
         event.preventDefault();
-        openEditor();
+        void openEditor().catch(error => {
+            console.error('Failed to initialize the fullscreen chat editor', error);
+            toastr.error(String(error));
+        });
     });
 
     collapseButton.addEventListener('click', () => {
@@ -238,21 +254,22 @@ export function installChatInputFullscreenEditor({ sendTextArea, sendMessage, is
         void sendFromEditor();
     });
 
-    textarea.addEventListener('keydown', (event) => {
+    // Capture before CodeMirror handles Mod-Enter as an editor command.
+    dialog.addEventListener('keydown', (event) => {
+        if (event.target !== textarea && !event.target.closest('.cm-content')) return;
         if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && !event.isComposing) {
             event.preventDefault();
+            event.stopPropagation();
             void sendFromEditor();
-            return;
         }
-
-        if (event.key === 'Escape') {
-            event.preventDefault();
-            closeEditor({ focusSource: !isMobile(), reason: 'cancel' });
-        }
-    });
+    }, { capture: true });
 
     dialog.addEventListener('keydown', (event) => {
         event.stopPropagation();
+        if (event.key === 'Escape' && !event.defaultPrevented && !event.isComposing) {
+            event.preventDefault();
+            closeEditor({ focusSource: !isMobile(), reason: 'cancel' });
+        }
     });
 
     dialog.addEventListener('cancel', (event) => {
@@ -261,9 +278,12 @@ export function installChatInputFullscreenEditor({ sendTextArea, sendMessage, is
     });
 
     dialog.addEventListener('close', () => {
+        editorMount?.abort();
         if (closingReason !== 'send') {
             commitEditorValue();
         }
+        getMountedCodeMirrorEditor(textarea)?.destroy();
+        editorMount = null;
 
         closingReason = '';
         if (pendingSourceFocus) {
@@ -274,6 +294,11 @@ export function installChatInputFullscreenEditor({ sendTextArea, sendMessage, is
 
     sendTextArea.addEventListener('input', queueButtonVisibilityUpdate);
     window.addEventListener('resize', queueButtonVisibilityUpdate);
+    const inputResizeObserver = typeof ResizeObserver === 'function'
+        ? new ResizeObserver(queueButtonVisibilityUpdate)
+        : null;
+    inputResizeObserver?.observe(sendTextArea);
+    inputResizeObserver?.observe(inputHost);
     queueButtonVisibilityUpdate();
 
     return {

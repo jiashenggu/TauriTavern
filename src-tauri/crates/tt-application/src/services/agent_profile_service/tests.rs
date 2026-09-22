@@ -1,0 +1,601 @@
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use serde_json::json;
+
+use crate::services::agent_tools::BuiltinAgentToolRegistry;
+use tt_domain::errors::DomainError;
+use tt_domain::models::agent::AgentModelTool;
+use tt_domain::models::agent::profile::{
+    AgentContextPolicy, AgentModelBinding, AgentModelBindingMode, AgentPresetBindingMode,
+    AgentPresetRef, AgentProfileDefinition, AgentProfileId, ResolvedAgentProfile,
+};
+use tt_domain::models::preset::{DefaultPreset, Preset, PresetType};
+use tt_domain::models::tool::ToolId;
+use tt_ports::repositories::agent_profile_repository::AgentProfileRepository;
+use tt_ports::repositories::agent_profile_storage_health_repository::{
+    AgentProfileStorageHealthRepository, AgentProfileStorageScan,
+};
+use tt_ports::repositories::preset_repository::PresetRepository;
+
+use super::{AgentProfileService, materialize_agent_system_prompt};
+
+#[test]
+fn materialized_agent_system_prompt_uses_profile_override_exactly() {
+    let profile = test_profile(
+        Some("Custom Agent System Prompt.\nKeep this exact."),
+        "foreground",
+    );
+
+    let prompt =
+        materialize_agent_system_prompt(&[tool("workspace.finish", "finish_alias")], &profile);
+
+    assert_eq!(prompt, "Custom Agent System Prompt.\nKeep this exact.");
+}
+
+#[test]
+fn requires_configuration_model_binding_is_valid_but_not_configured() {
+    let binding = AgentModelBinding {
+        mode: AgentModelBindingMode::RequiresConfiguration,
+        connection_ref: None,
+        model_id: None,
+    };
+
+    super::validation::validate_model_binding(&binding).expect("requiresConfiguration is saveable");
+
+    let mut profile = test_profile(None, "background");
+    profile.model = binding;
+    let error = super::ensure_profile_model_configured(&profile)
+        .expect_err("requiresConfiguration cannot run");
+
+    assert!(
+        error
+            .to_string()
+            .contains("agent.profile_model_requires_configuration")
+    );
+}
+
+#[test]
+fn requires_configuration_rejects_local_connection_fields() {
+    let binding = AgentModelBinding {
+        mode: AgentModelBindingMode::RequiresConfiguration,
+        connection_ref: Some("local-main".to_string()),
+        model_id: Some("secret-model".to_string()),
+    };
+
+    let error = super::validation::validate_model_binding(&binding)
+        .expect_err("requiresConfiguration must not carry local fields");
+
+    assert!(
+        error
+            .to_string()
+            .contains("agent.profile_model_requires_configuration_extra_fields")
+    );
+}
+
+#[test]
+fn context_policy_normalizes_negative_history_window_to_full_history() {
+    let mut policy = AgentContextPolicy {
+        initial_chat_history_messages: -42,
+        include_activated_world_info: true,
+    };
+
+    super::validation::normalize_context_policy(&mut policy).expect("negative values normalize");
+
+    assert_eq!(policy.initial_chat_history_messages, -1);
+}
+
+#[test]
+fn direct_runnable_profiles_require_finish_tool() {
+    let run = tt_domain::models::agent::profile::AgentRunPolicy {
+        presentation: tt_domain::models::agent::AgentRunPresentation::Background,
+        stream: false,
+        direct_runnable: true,
+        model_retry: Default::default(),
+    };
+    let delegation = tt_domain::models::agent::profile::AgentDelegationPolicy::default();
+    let tools = test_tool_policy(&["workspace.write_file"]);
+
+    let error = super::validation::validate_run_policy(&run, &delegation, &tools)
+        .expect_err("direct runnable profile without finish should fail");
+
+    assert!(error.to_string().contains("agent.profile_finish_required"));
+}
+
+#[test]
+fn subagent_only_profiles_do_not_require_finish_tool() {
+    let run = tt_domain::models::agent::profile::AgentRunPolicy {
+        presentation: tt_domain::models::agent::AgentRunPresentation::Background,
+        stream: false,
+        direct_runnable: false,
+        model_retry: Default::default(),
+    };
+    let delegation = tt_domain::models::agent::profile::AgentDelegationPolicy {
+        callable: true,
+        allow_as_subagent: true,
+        ..Default::default()
+    };
+    let tools = test_tool_policy(&["workspace.write_file"]);
+
+    super::validation::validate_run_policy(&run, &delegation, &tools)
+        .expect("subagent-only profile should not require workspace.finish");
+}
+
+#[test]
+fn tool_policy_rejects_duplicate_order_entries() {
+    let registry = BuiltinAgentToolRegistry::all();
+    let mut profile = super::defaults::default_writer_profile().expect("default writer profile");
+    profile.tools.allow.push(profile.tools.allow[0].clone());
+
+    let error = super::validation::validate_tool_policy(&profile.tools, registry.catalog())
+        .expect_err("duplicate tool order must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("agent.profile_tools_allow_duplicate")
+    );
+}
+
+#[test]
+fn tool_policy_rejects_zero_mcp_result_inline_limit() {
+    let registry = BuiltinAgentToolRegistry::all();
+    let mut profile = super::defaults::default_writer_profile().expect("default writer profile");
+    profile.tools.mcp_result_inline_char_limit = 0;
+
+    let error = super::validation::validate_tool_policy(&profile.tools, registry.catalog())
+        .expect_err("MCP result inline limit must be positive");
+    assert!(
+        error
+            .to_string()
+            .contains("agent.profile_mcp_result_inline_char_limit_invalid")
+    );
+}
+
+#[test]
+fn direct_runnable_false_requires_subagent_entrypoint() {
+    let run = tt_domain::models::agent::profile::AgentRunPolicy {
+        presentation: tt_domain::models::agent::AgentRunPresentation::Background,
+        stream: false,
+        direct_runnable: false,
+        model_retry: Default::default(),
+    };
+    let delegation = tt_domain::models::agent::profile::AgentDelegationPolicy::default();
+    let tools = test_tool_policy(&["workspace.write_file"]);
+
+    let error = super::validation::validate_run_policy(&run, &delegation, &tools)
+        .expect_err("non-direct profiles need a implemented non-direct entrypoint");
+
+    assert!(
+        error
+            .to_string()
+            .contains("agent.profile_direct_runnable_disabled_requires_delegation_target")
+    );
+}
+
+#[tokio::test]
+async fn profile_preset_retarget_updates_only_matching_refs() {
+    let profile_service = test_profile_service_with_presets(
+        TestPresetRepository::with_user_openai("New Writer Preset"),
+    );
+
+    save_profile_with_preset_ref(&profile_service, "writer", "openai", "Old Writer Preset").await;
+    save_profile_with_preset_ref(&profile_service, "critic", "openai", "Other Preset").await;
+
+    let result = profile_service
+        .retarget_preset_refs(
+            preset_ref("openai", "Old Writer Preset"),
+            preset_ref("openai", "New Writer Preset"),
+        )
+        .await
+        .expect("retarget profile preset refs");
+
+    assert_eq!(result.profile_ids.len(), 1);
+    assert_eq!(result.profile_ids[0].as_str(), "writer");
+    assert_eq!(
+        loaded_preset_name(&profile_service, "writer").await,
+        "New Writer Preset"
+    );
+    assert_eq!(
+        loaded_preset_name(&profile_service, "critic").await,
+        "Other Preset"
+    );
+}
+
+#[tokio::test]
+async fn profile_preset_retarget_requires_existing_target_preset() {
+    let profile_service = test_profile_service_with_presets(TestPresetRepository::default());
+    save_profile_with_preset_ref(&profile_service, "writer", "openai", "Old Writer Preset").await;
+
+    let error = profile_service
+        .retarget_preset_refs(
+            preset_ref("openai", "Old Writer Preset"),
+            preset_ref("openai", "Missing Writer Preset"),
+        )
+        .await
+        .expect_err("missing target preset should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("agent.profile_preset_retarget_target_missing")
+    );
+    assert_eq!(
+        loaded_preset_name(&profile_service, "writer").await,
+        "Old Writer Preset"
+    );
+}
+
+#[tokio::test]
+async fn profile_preset_retarget_rejects_same_or_cross_api_refs() {
+    let profile_service = test_profile_service_with_presets(TestPresetRepository::default());
+
+    let same_error = profile_service
+        .retarget_preset_refs(
+            preset_ref("openai", "Writer Preset"),
+            preset_ref("openai", "Writer Preset"),
+        )
+        .await
+        .expect_err("same refs are not a rename");
+    assert!(
+        same_error
+            .to_string()
+            .contains("agent.profile_preset_retarget_same_ref")
+    );
+
+    let cross_api_error = profile_service
+        .retarget_preset_refs(
+            preset_ref("openai", "Writer Preset"),
+            preset_ref("textgenerationwebui", "Writer Preset"),
+        )
+        .await
+        .expect_err("preset refs cannot cross api groups");
+    assert!(
+        cross_api_error
+            .to_string()
+            .contains("agent.profile_preset_retarget_api_mismatch")
+    );
+}
+
+#[tokio::test]
+async fn loading_v2_profile_persists_canonical_v3_tool_ids_once() {
+    let repository = Arc::new(TestAgentProfileRepository::default());
+    let service = AgentProfileService::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(TestPresetRepository::default()),
+    );
+    let mut legacy = super::defaults::default_writer_profile().unwrap();
+    legacy.id = AgentProfileId::parse("legacy-writer").unwrap();
+    legacy.schema_version = 2;
+    for id in legacy
+        .tools
+        .allow
+        .iter_mut()
+        .chain(legacy.tools.deny.iter_mut())
+    {
+        *id = id.strip_prefix("builtin:").unwrap().to_string();
+    }
+    legacy.tools.tool_descriptions = std::mem::take(&mut legacy.tools.tool_descriptions)
+        .into_iter()
+        .map(|(id, value)| (id.strip_prefix("builtin:").unwrap().to_string(), value))
+        .collect();
+    legacy.tools.max_calls_per_tool = std::mem::take(&mut legacy.tools.max_calls_per_tool)
+        .into_iter()
+        .map(|(id, value)| (id.strip_prefix("builtin:").unwrap().to_string(), value))
+        .collect();
+    repository.save_profile(&legacy).await.unwrap();
+
+    let loaded = service
+        .load_profile("legacy-writer")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.schema_version, 3);
+    assert!(
+        loaded
+            .tools
+            .allow
+            .iter()
+            .all(|id| id.starts_with("builtin:"))
+    );
+    let stored = repository
+        .load_profile(&AgentProfileId::parse("legacy-writer").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.schema_version, 3);
+    assert_eq!(stored.tools.allow, loaded.tools.allow);
+}
+
+fn test_profile_service_with_presets(
+    preset_repository: TestPresetRepository,
+) -> Arc<AgentProfileService> {
+    let profile_repository = Arc::new(TestAgentProfileRepository::default());
+    Arc::new(AgentProfileService::new(
+        profile_repository.clone(),
+        profile_repository,
+        Arc::new(preset_repository),
+    ))
+}
+
+#[derive(Default)]
+struct TestAgentProfileRepository {
+    profiles: Mutex<Vec<AgentProfileDefinition>>,
+}
+
+#[async_trait]
+impl AgentProfileRepository for TestAgentProfileRepository {
+    async fn load_profile(
+        &self,
+        id: &AgentProfileId,
+    ) -> Result<Option<AgentProfileDefinition>, DomainError> {
+        Ok(self
+            .profiles
+            .lock()
+            .expect("profiles lock")
+            .iter()
+            .find(|profile| profile.id == *id)
+            .cloned())
+    }
+
+    async fn save_profile(&self, profile: &AgentProfileDefinition) -> Result<(), DomainError> {
+        let mut profiles = self.profiles.lock().expect("profiles lock");
+        if let Some(existing) = profiles
+            .iter_mut()
+            .find(|existing| existing.id == profile.id)
+        {
+            *existing = profile.clone();
+        } else {
+            profiles.push(profile.clone());
+        }
+        Ok(())
+    }
+
+    async fn delete_profile(&self, id: &AgentProfileId) -> Result<(), DomainError> {
+        self.profiles
+            .lock()
+            .expect("profiles lock")
+            .retain(|profile| profile.id != *id);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl AgentProfileStorageHealthRepository for TestAgentProfileRepository {
+    async fn scan_profiles(&self) -> Result<AgentProfileStorageScan, DomainError> {
+        Ok(AgentProfileStorageScan {
+            profiles: self
+                .profiles
+                .lock()
+                .expect("profiles lock")
+                .iter()
+                .map(AgentProfileDefinition::summary)
+                .collect(),
+            issues: Vec::new(),
+        })
+    }
+
+    async fn normalize_profile_file_identity(
+        &self,
+        _id: &AgentProfileId,
+    ) -> Result<(), DomainError> {
+        Ok(())
+    }
+}
+
+async fn save_profile_with_preset_ref(
+    profile_service: &AgentProfileService,
+    profile_id: &str,
+    api_id: &str,
+    preset_name: &str,
+) {
+    let mut profile = profile_service
+        .load_profile("default-writer")
+        .await
+        .expect("load default profile")
+        .expect("default profile exists");
+    profile.id = AgentProfileId::parse(profile_id).expect("profile id");
+    profile.preset.mode = AgentPresetBindingMode::Ref;
+    profile.preset.ref_ = Some(preset_ref(api_id, preset_name));
+    profile.preset.required = true;
+    let registry = BuiltinAgentToolRegistry::all();
+    profile_service
+        .save_profile(profile, registry.catalog())
+        .await
+        .expect("save profile");
+}
+
+async fn loaded_preset_name(profile_service: &AgentProfileService, profile_id: &str) -> String {
+    profile_service
+        .load_profile(profile_id)
+        .await
+        .expect("load profile")
+        .expect("profile exists")
+        .preset
+        .ref_
+        .expect("profile preset ref")
+        .name
+}
+
+fn preset_ref(api_id: &str, name: &str) -> AgentPresetRef {
+    AgentPresetRef {
+        api_id: api_id.to_string(),
+        name: name.to_string(),
+    }
+}
+
+#[derive(Default)]
+struct TestPresetRepository {
+    user_openai: Vec<String>,
+    default_openai: Vec<String>,
+}
+
+impl TestPresetRepository {
+    fn with_user_openai(name: &str) -> Self {
+        Self {
+            user_openai: vec![name.to_string()],
+            default_openai: Vec::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl PresetRepository for TestPresetRepository {
+    async fn save_preset(&self, _preset: &Preset) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    async fn delete_preset(
+        &self,
+        _name: &str,
+        _preset_type: &PresetType,
+    ) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    async fn preset_exists(
+        &self,
+        name: &str,
+        preset_type: &PresetType,
+    ) -> Result<bool, DomainError> {
+        Ok(*preset_type == PresetType::OpenAI
+            && self.user_openai.iter().any(|preset| preset == name))
+    }
+
+    async fn get_preset(
+        &self,
+        name: &str,
+        preset_type: &PresetType,
+    ) -> Result<Option<Preset>, DomainError> {
+        if self.preset_exists(name, preset_type).await? {
+            return Ok(Some(Preset::new(
+                name.to_string(),
+                preset_type.clone(),
+                json!({ "chat_completion_source": "openai" }),
+            )));
+        }
+        Ok(None)
+    }
+
+    async fn list_presets(&self, preset_type: &PresetType) -> Result<Vec<String>, DomainError> {
+        if *preset_type == PresetType::OpenAI {
+            return Ok(self.user_openai.clone());
+        }
+        Ok(Vec::new())
+    }
+
+    async fn get_default_preset(
+        &self,
+        name: &str,
+        preset_type: &PresetType,
+    ) -> Result<Option<DefaultPreset>, DomainError> {
+        if *preset_type != PresetType::OpenAI
+            || !self.default_openai.iter().any(|preset| preset == name)
+        {
+            return Ok(None);
+        }
+        Ok(Some(DefaultPreset {
+            filename: format!("{name}.json"),
+            name: name.to_string(),
+            preset_type: PresetType::OpenAI,
+            is_default: true,
+            data: json!({ "chat_completion_source": "openai" }),
+        }))
+    }
+}
+
+fn tool(name: &str, model_alias: &str) -> AgentModelTool {
+    AgentModelTool {
+        tool_id: ToolId::builtin(name).unwrap(),
+        model_alias: model_alias.to_string(),
+        description: None,
+        input_schema: json!({}),
+    }
+}
+
+fn test_tool_policy(allow: &[&str]) -> tt_domain::models::agent::profile::ResolvedAgentToolPolicy {
+    tt_domain::models::agent::profile::ResolvedAgentToolPolicy {
+        allow: allow
+            .iter()
+            .map(|name| ToolId::builtin(name).unwrap())
+            .collect(),
+        deny: Vec::new(),
+        tool_descriptions: Default::default(),
+        max_rounds: 1,
+        max_calls_per_run: 1,
+        mcp_result_inline_char_limit: 50_000,
+        max_calls_per_tool: Default::default(),
+    }
+}
+
+fn test_profile(agent_system_prompt: Option<&str>, presentation: &str) -> ResolvedAgentProfile {
+    let instructions = match agent_system_prompt {
+        Some(prompt) => json!({ "agentSystemPrompt": prompt }),
+        None => json!({}),
+    };
+
+    serde_json::from_value(json!({
+        "schemaVersion": 3,
+        "kind": "tauritavern.agentProfile",
+        "id": "test",
+        "displayName": "Test",
+        "preset": {
+            "mode": "none",
+            "required": false
+        },
+        "model": {
+            "mode": "currentPromptSnapshot"
+        },
+        "run": {
+            "presentation": presentation,
+            "modelRetry": {
+                "maxRetries": 0,
+                "intervalMs": 3000
+            }
+        },
+        "context": {
+            "initialChatHistoryMessages": -1,
+            "includeActivatedWorldInfo": true
+        },
+        "instructions": instructions,
+        "tools": {
+            "allow": ["builtin:workspace.finish"],
+            "deny": [],
+            "toolDescriptions": {},
+            "maxRounds": 1,
+            "maxCallsPerRun": 1,
+            "maxCallsPerTool": {}
+        },
+        "skills": {
+            "visible": ["*"],
+            "deny": [],
+            "maxReadCharsPerCall": 1,
+            "maxReadCharsPerRun": 1
+        },
+        "workspace": {
+            "visibleRoots": ["output", "persist"],
+            "writableRoots": ["output", "persist"]
+        },
+        "plan": {
+            "mode": "none",
+            "beta": true,
+            "nodes": []
+        },
+        "output": {
+            "artifacts": [{
+                "id": "main",
+                "path": "output/main.md",
+                "kind": "markdown",
+                "target": "message_body",
+                "required": true,
+                "assemblyOrder": 0
+            }],
+            "messageBodyArtifactId": "main",
+            "messageBodyPath": "output/main.md"
+        },
+        "sourceTrace": {
+            "profileSource": "test"
+        }
+    }))
+    .expect("test profile")
+}
