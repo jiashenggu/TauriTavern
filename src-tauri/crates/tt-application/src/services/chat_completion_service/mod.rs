@@ -1036,6 +1036,66 @@ fn sanitize_provider_bound_payload_before_llm_api(
     if remove_system {
         object.remove("system");
     }
+
+    if endpoint_path == "/chat/completions" {
+        complete_vertex_gemini_text_tail(
+            object.get_mut("messages"),
+            body_model.as_deref().or(model_hint),
+        );
+    }
+}
+
+fn complete_vertex_gemini_text_tail(messages: Option<&mut Value>, model: Option<&str>) {
+    let Some(model) = model else {
+        return;
+    };
+    let model = model.trim().to_ascii_lowercase();
+    let Some(model) = model
+        .strip_prefix("gcp/google/")
+        .or_else(|| model.strip_prefix("vertex_ai/"))
+    else {
+        return;
+    };
+    if !model.starts_with("gemini-3.") && !model.starts_with("gemini-3-") {
+        return;
+    }
+    let Some(Value::Array(messages)) = messages else {
+        return;
+    };
+    let mut turns = messages
+        .iter()
+        .rev()
+        .filter(|message| !matches!(message["role"].as_str(), Some("system" | "developer")))
+        .peekable();
+    if !turns
+        .peek()
+        .is_some_and(|message| message["role"] == "assistant")
+    {
+        return;
+    }
+    let text_only = turns
+        .take_while(|message| message["role"] == "assistant")
+        .all(|message| {
+            let Some(message) = message.as_object() else {
+                return false;
+            };
+            if message
+                .keys()
+                .any(|key| !matches!(key.as_str(), "role" | "content" | "name"))
+            {
+                return false;
+            }
+            match message.get("content") {
+                Some(Value::String(_)) => true,
+                Some(Value::Array(parts)) => parts.iter().all(|part| {
+                    part["type"] == "text" && part.get("text").is_some_and(Value::is_string)
+                }),
+                _ => false,
+            }
+        });
+    if text_only {
+        messages.push(json!({ "role": "user", "content": "." }));
+    }
 }
 
 fn model_disallows_assistant_prefill(model: Option<&str>) -> bool {
@@ -1292,7 +1352,7 @@ mod tests {
     use super::{
         AdditionalParameters, ChatCompletionService, apply_nanogpt_claude_cache_control,
         apply_opencode_session_header, apply_vertexai_prompt_cache_session_header,
-        ensure_vertexai_claude_prompt_cache_ttl, resolve_status_model_list_source,
+        ensure_vertexai_claude_prompt_cache_ttl, payload, resolve_status_model_list_source,
         sanitize_provider_bound_payload_before_llm_api,
     };
     use crate::errors::ApplicationError;
@@ -1422,6 +1482,61 @@ mod tests {
     }
 
     #[test]
+    fn llm_boundary_sanitizer_preserves_provider_built_prefill() {
+        for (source, model) in [
+            (ChatCompletionSource::DeepSeek, "deepseek-chat"),
+            (ChatCompletionSource::Claude, "claude-sonnet-4-5"),
+        ] {
+            let input = json!({
+                "model": model,
+                "messages": [
+                    { "role": "user", "content": "continue" },
+                    { "role": "assistant", "content": "partial reply" }
+                ],
+            });
+            let (endpoint_path, mut payload) =
+                payload::build_payload(source, input.as_object().unwrap().clone())
+                    .expect("provider payload should build");
+            let expected = payload["messages"].clone();
+
+            sanitize_provider_bound_payload_before_llm_api(
+                &mut payload,
+                Some(model),
+                &endpoint_path,
+            );
+
+            assert_eq!(payload["messages"], expected, "{model}");
+            let last = payload["messages"].as_array().unwrap().last().unwrap();
+            assert_eq!(last["role"], "assistant");
+            if source == ChatCompletionSource::DeepSeek {
+                assert_eq!(last["prefix"], true);
+            }
+        }
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_preserves_openai_tool_exchange_and_trailing_control() {
+        let mut payload = json!({
+            "model": "gpt-4o",
+            "messages": [
+                { "role": "user", "content": "check the weather" },
+                { "role": "assistant", "content": null, "tool_calls": [
+                    { "id": "call_1", "type": "function", "function": { "name": "weather", "arguments": "{}" } }
+                ] },
+                { "role": "tool", "tool_call_id": "call_1", "content": "sunny" },
+                { "role": "system", "content": "Return a concise summary" }
+            ],
+        });
+        let expected = payload.clone();
+        payload::validate_upstream_tool_transcript("/chat/completions", &payload).unwrap();
+
+        sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
+
+        assert_eq!(payload, expected);
+        payload::validate_upstream_tool_transcript("/chat/completions", &payload).unwrap();
+    }
+
+    #[test]
     fn llm_boundary_sanitizer_removes_blank_top_level_system_string() {
         let mut payload = json!({
             "model": "test-model",
@@ -1512,6 +1627,7 @@ mod tests {
         sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "");
 
         assert_eq!(payload["messages"][1]["content"], "partial reply");
+        assert_eq!(payload["messages"][0]["role"], "user");
     }
 
     #[test]
@@ -1568,7 +1684,7 @@ mod tests {
     }
 
     #[test]
-    fn llm_boundary_sanitizer_keeps_assistant_prefill_for_unsupported_bedrock_claude() {
+    fn llm_boundary_sanitizer_preserves_assistant_prefill_field_while_moving_user() {
         let mut payload = json!({
             "model": "aws/anthropic/bedrock-claude-opus-4-7",
             "assistant_prefill": "prefill",
@@ -1594,55 +1710,122 @@ mod tests {
     }
 
     #[test]
-    fn llm_boundary_sanitizer_uses_model_hint_when_body_model_is_absent() {
-        let mut payload = json!({
-            "messages": [
-                { "role": "user", "content": "continue" },
-                { "role": "assistant", "content": "partial reply" }
-            ],
-        });
+    fn llm_boundary_sanitizer_keeps_assistant_prefill_outside_vertex_gemini_3() {
+        for model in [
+            "gemini/gemini-3.7-flash",
+            "gcp/google/gemini-2.5-flash",
+            "model-alias",
+        ] {
+            let mut payload = json!({
+                "model": model,
+                "messages": [
+                    { "role": "user", "content": "continue" },
+                    { "role": "assistant", "content": "partial reply" }
+                ],
+            });
+            let expected = payload.clone();
 
-        sanitize_provider_bound_payload_before_llm_api(
-            &mut payload,
-            Some("global.anthropic.claude-opus-4-6-v1:0"),
-            "",
-        );
+            sanitize_provider_bound_payload_before_llm_api(
+                &mut payload,
+                Some("gcp/google/gemini-3.8-flash"),
+                "/chat/completions",
+            );
 
-        let messages = payload
-            .get("messages")
-            .and_then(Value::as_array)
-            .expect("messages must remain");
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0]["role"], "assistant");
-        assert_eq!(messages[1]["role"], "user");
+            assert_eq!(payload, expected, "{model}");
+        }
     }
 
     #[test]
-    fn llm_boundary_sanitizer_uses_endpoint_path_when_body_model_is_absent() {
-        let mut payload = json!({
-            "messages": [
-                { "role": "user", "content": "continue" },
-                { "role": "assistant", "content": "partial reply" }
-            ],
-        });
+    fn llm_boundary_sanitizer_completes_vertex_gemini_text_tail_without_reordering() {
+        for model in ["gcp/google/gemini-3.8-flash", "vertex_ai/gemini-3.7-flash"] {
+            for content in [
+                json!("<tableEdit>"),
+                json!([{ "type": "text", "text": "<tableEdit>" }]),
+            ] {
+                let input = json!({
+                    "model": model,
+                    "messages": [
+                        { "role": "system", "content": "Update the database tables" },
+                        { "role": "user", "content": "Latest story" },
+                        { "role": "assistant", "content": content },
+                        { "role": "system", "content": "Return table edits only" }
+                    ]
+                });
+                let (endpoint, mut payload) = payload::build_payload(
+                    ChatCompletionSource::Custom,
+                    input.as_object().unwrap().clone(),
+                )
+                .unwrap();
+                let mut expected = payload["messages"].as_array().unwrap().clone();
+                expected.push(json!({ "role": "user", "content": "." }));
 
-        sanitize_provider_bound_payload_before_llm_api(
-            &mut payload,
-            None,
-            "/model/us.anthropic.claude-opus-4.7-v1:0/invoke",
-        );
+                sanitize_provider_bound_payload_before_llm_api(
+                    &mut payload,
+                    Some(model),
+                    &endpoint,
+                );
 
-        let messages = payload
-            .get("messages")
-            .and_then(Value::as_array)
-            .expect("messages must remain");
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0]["role"], "assistant");
-        assert_eq!(messages[1]["role"], "user");
+                assert_eq!(payload["messages"], json!(expected), "{model}");
+                sanitize_provider_bound_payload_before_llm_api(
+                    &mut payload,
+                    Some(model),
+                    &endpoint,
+                );
+                assert_eq!(payload["messages"], json!(expected), "must be idempotent");
+            }
+        }
     }
 
     #[test]
-    fn llm_boundary_sanitizer_keeps_trailing_assistant_messages_for_unsupported_claude() {
+    fn llm_boundary_sanitizer_preserves_vertex_gemini_non_text_tails() {
+        for tail in [
+            json!([{ "role": "user", "content": "Update tables" }]),
+            json!([
+                { "role": "assistant", "content": null, "tool_calls": [
+                    { "id": "call_1", "type": "function", "function": { "name": "weather", "arguments": "{}" } }
+                ] },
+                { "role": "tool", "tool_call_id": "call_1", "content": "sunny" }
+            ]),
+            json!([{ "role": "assistant", "content": [
+                { "type": "text", "text": "Picture" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AA==" } }
+            ] }]),
+        ] {
+            let mut messages = vec![json!({ "role": "user", "content": "Context" })];
+            messages.extend(tail.as_array().unwrap().iter().cloned());
+            let mut payload =
+                json!({ "model": "gcp/google/gemini-3.8-flash", "messages": messages });
+            let expected = payload.clone();
+
+            payload::validate_upstream_tool_transcript("/chat/completions", &payload).unwrap();
+            sanitize_provider_bound_payload_before_llm_api(&mut payload, None, "/chat/completions");
+
+            assert_eq!(payload, expected);
+            payload::validate_upstream_tool_transcript("/chat/completions", &payload).unwrap();
+        }
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_uses_model_hint_or_endpoint_when_body_model_is_absent() {
+        for (hint, endpoint) in [
+            (Some("global.anthropic.claude-opus-4-6-v1:0"), ""),
+            (None, "/model/us.anthropic.claude-opus-4.7-v1:0/invoke"),
+            (None, "/model/anthropic.claude%2Dsonnet%2D4%2E6/invoke"),
+        ] {
+            let mut payload = json!({
+                "messages": [
+                    { "role": "user", "content": "continue" },
+                    { "role": "assistant", "content": "partial reply" }
+                ],
+            });
+            sanitize_provider_bound_payload_before_llm_api(&mut payload, hint, endpoint);
+            assert_eq!(payload["messages"][0]["role"], "assistant");
+            assert_eq!(payload["messages"][1]["role"], "user");
+        }
+    }
+
+    #[test]
+    fn llm_boundary_sanitizer_preserves_trailing_assistant_message_data() {
         let mut payload = json!({
             "model": "aws/anthropic/bedrock-claude-opus-4-6",
             "messages": [
@@ -1763,8 +1946,9 @@ mod tests {
             .and_then(Value::as_array)
             .expect("messages must remain");
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[0]["role"], "user");
         assert_eq!(messages[1]["content"], "partial reply");
+        assert_eq!(messages[1]["role"], "assistant");
     }
 
     #[test]
