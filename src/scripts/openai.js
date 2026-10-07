@@ -856,9 +856,10 @@ function normalizeAdditionalParametersEntry(value) {
         throw new Error('additional_parameters_by_source entries must be objects');
     }
 
+    const defaults = createAdditionalParametersEntry();
     for (const key of ['include_body', 'exclude_body', 'include_headers']) {
         if (value[key] === undefined) {
-            value[key] = '';
+            value[key] = defaults[key];
             continue;
         }
 
@@ -5937,7 +5938,7 @@ export class ChatCompletion {
  * @param {ChatCompletionSettings} settings Settings to migrate
  * @returns {boolean} True if settings were changed
  */
-function migrateChatCompletionSettings(settings) {
+function migrateChatCompletionSettings(settings, { preserveMissing = false } = {}) {
     let changed = false;
     for (const key of ['strip_old_tool_calls', 'claude_fast_mode']) {
         if (settings[key] === undefined) {
@@ -5975,11 +5976,13 @@ function migrateChatCompletionSettings(settings) {
         }
     }
 
-    if (migrateAdditionalParameters(settings)) {
+    const hasAdditionalParameters = ['additional_parameters_by_source', 'custom_include_body', 'custom_exclude_body', 'custom_include_headers']
+        .some(key => settings[key] !== undefined);
+    if ((!preserveMissing || hasAdditionalParameters) && migrateAdditionalParameters(settings)) {
         changed = true;
     }
 
-    if (migrateCustomModels(settings)) {
+    if ((!preserveMissing || settings.custom_models_by_source !== undefined) && migrateCustomModels(settings)) {
         changed = true;
     }
 
@@ -6007,6 +6010,10 @@ function migrateAdditionalParameters(settings) {
     }
 
     const store = getAdditionalParametersStore(settings);
+    const legacySourceKey = getAdditionalParametersSourceKey(settings);
+    const legacySourceEntry = store[legacySourceKey];
+    const missingLegacyFields = new Set(['include_body', 'exclude_body', 'include_headers']
+        .filter(key => legacySourceEntry?.[key] === undefined));
     for (const key of Object.keys(store)) {
         store[key] = normalizeAdditionalParametersEntry(store[key]);
     }
@@ -6021,10 +6028,15 @@ function migrateAdditionalParameters(settings) {
 
     if (hasLegacyValues) {
         const sourceKey = getAdditionalParametersSourceKey(settings);
+        // Preserve legacy choices before a new source receives the current defaults.
+        if (store[sourceKey] === undefined) {
+            store[sourceKey] = legacy;
+            changed = true;
+        }
         const entry = getAdditionalParametersForSource(settings, sourceKey);
 
         for (const key of ['include_body', 'exclude_body', 'include_headers']) {
-            if (!entry[key].trim() && legacy[key].trim()) {
+            if ((!entry[key].trim() || missingLegacyFields.has(key)) && legacy[key].trim()) {
                 entry[key] = legacy[key];
                 changed = true;
             }
@@ -6721,7 +6733,7 @@ async function onPresetImportFileChange(e) {
     if (Object.keys(openai_setting_names).includes(data.name)) {
         oai_settings.preset_settings_openai = data.name;
         const value = openai_setting_names[data.name];
-        Object.assign(openai_settings[value], presetBody);
+        openai_settings[value] = presetBody;
         $(`#settings_preset_openai option[value="${value}"]`).prop('selected', true);
         $('#settings_preset_openai').trigger('change');
     } else {
@@ -6913,7 +6925,7 @@ function onSettingsPresetChange() {
     const presetIndex = openai_setting_names[oai_settings.preset_settings_openai];
     const preset = structuredClone(openai_settings[presetIndex]);
 
-    if (migrateChatCompletionSettings(preset)) {
+    if (migrateChatCompletionSettings(preset, { preserveMissing: true })) {
         openai_settings[presetIndex] = structuredClone(preset);
     }
 
