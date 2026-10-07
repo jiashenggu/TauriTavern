@@ -2,7 +2,7 @@ use std::path::Path;
 use std::str;
 
 use tokio::fs::{self, File};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 
 use tt_domain::errors::DomainError;
 use tt_ports::repositories::chat_repository::ChatPayloadCursor;
@@ -142,15 +142,36 @@ pub(super) async fn read_first_line_and_end_offset(
     }
 }
 
-pub(super) fn verify_cursor_signature(
+pub(super) async fn verify_cursor_offset_is_line_boundary(
     path: &Path,
-    cursor: ChatPayloadCursor,
-    metadata: &std::fs::Metadata,
+    cursor_offset: u64,
 ) -> Result<(), DomainError> {
-    let (size, modified_millis) = file_signature_from_metadata(metadata)?;
-    if cursor.size != size || cursor.modified_millis != modified_millis {
+    if cursor_offset == 0 {
+        return Ok(());
+    }
+
+    let mut file = open_existing_payload_file(path).await?;
+
+    file.seek(SeekFrom::Start(cursor_offset.saturating_sub(1)))
+        .await
+        .map_err(|error| {
+            DomainError::InternalError(format!(
+                "Failed to seek chat payload file {:?}: {}",
+                path, error
+            ))
+        })?;
+
+    let mut byte = [0u8; 1];
+    file.read_exact(&mut byte).await.map_err(|error| {
+        DomainError::InternalError(format!(
+            "Failed to read chat payload file {:?}: {}",
+            path, error
+        ))
+    })?;
+
+    if byte[0] != b'\n' {
         return Err(DomainError::InvalidData(format!(
-            "Cursor signature mismatch for {:?}",
+            "Cursor offset is not at a JSONL line boundary for {:?}",
             path
         )));
     }

@@ -26,8 +26,9 @@ use tt_ports::repositories::chat_repository::{
     ChatBackupCatalogEntry, ChatByteReader, ChatExportFormat, ChatImportFormat, ChatRepository,
 };
 use tt_ports::repositories::chat_types::{
-    ChatMessageSearchHit, ChatMessageSearchQuery, ChatPayloadChunk, ChatPayloadCursor,
-    ChatPayloadTail, FindLastMessageQuery, LocatedChatMessage, PinnedCharacterChat,
+    ChatMessageSearchHit, ChatMessageSearchQuery, ChatMessagesReadResult, ChatPayloadChunk,
+    ChatPayloadCursor, ChatPayloadTail, FindLastMessageQuery, LocatedChatMessage,
+    PinnedCharacterChat,
 };
 
 /// Service for managing chats
@@ -628,8 +629,7 @@ impl ChatService {
         character_name: &str,
         file_name: &str,
         indices: &[usize],
-    ) -> Result<crate::domain::repositories::chat_types::ChatMessagesReadResult, ApplicationError>
-    {
+    ) -> Result<ChatMessagesReadResult, ApplicationError> {
         self.chat_repository
             .read_character_chat_messages(character_name, file_name, indices)
             .await

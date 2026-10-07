@@ -3499,8 +3499,17 @@ async fn chat_payload_paging_returns_tail_and_before_for_character_and_group() {
         .expect("replace character payload");
     let stale = repository
         .get_chat_payload_before_lines("alice", "session", stale_cursor, 1)
-        .await;
-    assert!(stale.is_err(), "stale paging cursor must be rejected");
+        .await
+        .expect("stale paging cursor must still read the same window");
+    assert_eq!(
+        stale
+            .lines
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line).expect("parse stale line"))
+            .collect::<Vec<_>>(),
+        payload[2..3]
+    );
+    assert!(stale.cursor.size > stale_cursor.size);
 
     let _ = fs::remove_dir_all(&root).await;
 }

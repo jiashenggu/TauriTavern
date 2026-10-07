@@ -42,7 +42,6 @@ export const SCRIPT_TYPE_UNKNOWN = -1;
  */
 const DEFAULT_GET_REGEX_SCRIPTS_OPTIONS = Object.freeze({ allowedOnly: false });
 const SUBSTITUTE_PARAM_TOKEN_REGEX = /{{|<(?:USER|BOT|CHAR|CHARIFNOTGROUP|GROUP)>/i;
-const SUBSTITUTE_PARAM_TOKEN_REGEX = /{{|<(?:USER|BOT|CHAR|CHARIFNOTGROUP|GROUP)>/i;
 const REPLACEMENT_CAPTURE_REF_REGEX = /\$(?:\d+|<[^>]+>)/;
 const pausedRegexScriptKeys = new Set();
 const allowedSlowRegexScriptKeys = new Set();

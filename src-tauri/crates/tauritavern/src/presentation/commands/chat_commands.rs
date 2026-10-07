@@ -17,6 +17,7 @@ use tt_contracts::chat::ChatBackupCatalogEntry;
 use tt_ports::repositories::chat_repository::{
     ChatByteReader, ChatPayloadChunk, ChatPayloadCursor, ChatPayloadTail,
 };
+use tt_ports::repositories::chat_types::ChatMessagesReadResult;
 
 const CHAT_BACKUP_DOWNLOAD_CHUNK_BYTES: usize = 512 * 1024;
 
@@ -479,7 +480,7 @@ pub async fn read_character_chat_messages(
     file_name: String,
     indices: Vec<usize>,
     app_state: State<'_, Arc<AppState>>,
-) -> Result<crate::domain::repositories::chat_types::ChatMessagesReadResult, CommandError> {
+) -> Result<ChatMessagesReadResult, CommandError> {
     log_command(format!(
         "read_character_chat_messages {}/{} ({} indices)",
         character_name,
@@ -488,6 +489,7 @@ pub async fn read_character_chat_messages(
     ));
 
     app_state
+        .services
         .chat_service
         .read_character_chat_messages(&character_name, &file_name, &indices)
         .await
