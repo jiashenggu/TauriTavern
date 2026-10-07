@@ -14,7 +14,6 @@ import { ARGUMENT_TYPE, SlashCommandArgument, SlashCommandNamedArgument } from '
 import { commonEnumProviders, enumIcons } from './slash-commands/SlashCommandCommonEnumsProvider.js';
 import { enumTypes, SlashCommandEnumValue } from './slash-commands/SlashCommandEnumValue.js';
 import { SlashCommandParser } from './slash-commands/SlashCommandParser.js';
-import { shouldCommitStreamingMessage } from './tauri/perf/streaming-render-policy.js';
 import { textgen_types, textgenerationwebui_settings } from './textgen-settings.js';
 import { applyStreamFadeIn } from './util/stream-fadein.js';
 import { copyText, escapeRegex, isFalseBoolean, isTrueBoolean, setDatasetProperty, stringToRange, trimSpaces } from './utils.js';
@@ -90,9 +89,15 @@ function toggleReasoningAutoExpand() {
     const reasoningBlocks = document.querySelectorAll('details.mes_reasoning_details');
     reasoningBlocks.forEach((block) => {
         if (block instanceof HTMLDetailsElement) {
-            block.open = power_user.reasoning.auto_expand;
+            delete block.dataset.reasoningUserOpen;
+            block.open = power_user.reasoning.auto_expand && block.dataset.state !== ReasoningState.Hidden;
         }
     });
+}
+
+function setReasoningUserOpen(details, open) {
+    details.dataset.reasoningUserOpen = String(open);
+    details.open = open;
 }
 
 /**
@@ -287,6 +292,9 @@ export class ReasoningHandler {
     #isParsingReasoning = false;
     /** @type {number?} When reasoning is being parsed manually, and the reasoning has ended, this will be the index at which the actual messages starts */
     #parsingReasoningMesStartIndex = null;
+    #renderedReasoning = null;
+    #renderedContentDom = null;
+    #renderedState = null;
 
     /**
      * @param {Date?} [timeStarted=null] - When the generation started
@@ -317,8 +325,6 @@ export class ReasoningHandler {
         this.messageReasoningDetailsDom = null;
         /** @type {HTMLElement} Reasoning content DOM element `.mes_reasoning` */
         this.messageReasoningContentDom = null;
-        /** @type {string|null} Last canonical reasoning HTML committed during streaming. */
-        this.lastCommittedHtml = null;
         /** @type {HTMLElement} Reasoning header DOM element `.mes_reasoning_header_title` */
         this.messageReasoningHeaderDom = null;
     }
@@ -382,6 +388,9 @@ export class ReasoningHandler {
 
         // Make sure reset correctly clears all relevant states
         if (reset) {
+            delete messageElement.querySelector('.mes_reasoning_details')?.dataset.reasoningUserOpen;
+            this.#renderedReasoning = null;
+            this.#renderedState = null;
             this.state = this.#isHiddenReasoningModel ? ReasoningState.Thinking : ReasoningState.None;
             this.type = null;
             this.reasoning = '';
@@ -393,7 +402,8 @@ export class ReasoningHandler {
 
         this.updateDom(messageId);
 
-        if (power_user.reasoning.auto_expand && this.state !== ReasoningState.Hidden) {
+        if (power_user.reasoning.auto_expand && this.state !== ReasoningState.Hidden
+            && this.messageReasoningDetailsDom.dataset.reasoningUserOpen === undefined) {
             this.messageReasoningDetailsDom.open = true;
         }
     }
@@ -552,13 +562,37 @@ export class ReasoningHandler {
             }
 
             if (this.state === ReasoningState.Thinking) {
-                this.state = this.#isHiddenReasoningModel ? ReasoningState.Hidden : ReasoningState.Done;
+                this.state = this.#isHiddenReasoningModel && !this.reasoning ? ReasoningState.Hidden : ReasoningState.Done;
                 this.updateReasoning(messageId, null, { persist: true });
                 await eventSource.emit(event_types.STREAM_REASONING_DONE, this.reasoning, this.getDuration(), messageId, this.state);
             }
         }
 
         this.updateDom(messageId, { final: true });
+    }
+
+    flushPendingRender(messageId) {
+        if (this.messageReasoningContentDom !== null) {
+            this.#renderReasoning(messageId);
+        }
+    }
+
+    #renderReasoning(messageId) {
+        const reasoning = trimSpaces(this.reasoningDisplayText ?? this.reasoning);
+        const contentChanged = reasoning !== this.#renderedReasoning || this.messageReasoningContentDom !== this.#renderedContentDom;
+        // Streaming already bounds updates using streaming_fps. Skip unchanged
+        // content, but render every changed value that reaches this method.
+        if (contentChanged) {
+            const displayReasoning = messageFormatting(reasoning, '', false, false, messageId, {}, true);
+            if (power_user.stream_fade_in) {
+                applyStreamFadeIn(this.messageReasoningContentDom, displayReasoning);
+            } else {
+                this.messageReasoningContentDom.innerHTML = displayReasoning;
+            }
+            this.#renderedReasoning = reasoning;
+            this.#renderedContentDom = this.messageReasoningContentDom;
+        }
+        return reasoning;
     }
 
     /**
@@ -582,22 +616,7 @@ export class ReasoningHandler {
         setDatasetPropertyIfChanged(this.messageReasoningDetailsDom, 'type', this.type);
 
         // Update the reasoning message
-        const reasoning = trimSpaces(this.reasoningDisplayText ?? this.reasoning);
-        const displayReasoning = messageFormatting(reasoning, '', false, false, messageId, {}, true);
-
-        if (shouldCommitStreamingMessage({
-            lastCommittedHtml: this.lastCommittedHtml,
-            nextHtml: displayReasoning,
-            final,
-            fadeIn: power_user.stream_fade_in,
-        })) {
-            if (power_user.stream_fade_in) {
-                applyStreamFadeIn(this.messageReasoningContentDom, displayReasoning);
-            } else {
-                this.messageReasoningContentDom.innerHTML = displayReasoning;
-            }
-            this.lastCommittedHtml = displayReasoning;
-        }
+        const reasoning = this.#renderReasoning(messageId);
 
         // Update tooltip for hidden reasoning edit
         /** @type {HTMLElement} */
@@ -608,9 +627,23 @@ export class ReasoningHandler {
         }
 
         // Make sure that hidden reasoning headers are collapsed by default, to not show a useless edit button
-        if (this.state === ReasoningState.Hidden && this.messageReasoningDetailsDom.open) {
-            this.messageReasoningDetailsDom.open = false;
+        const details = this.messageReasoningDetailsDom;
+        const swipeId = String(chat[messageId]?.swipe_id ?? 0);
+        if (details.dataset.reasoningSwipeId !== swipeId) {
+            delete details.dataset.reasoningUserOpen;
+            details.dataset.reasoningSwipeId = swipeId;
+            this.#renderedState = null;
         }
+        if (details.querySelector('.reasoning_edit_textarea')) {
+            details.open = true;
+        } else if (this.state === ReasoningState.Hidden) {
+            details.open = false;
+        } else if (details.dataset.reasoningUserOpen !== undefined) {
+            details.open = details.dataset.reasoningUserOpen === 'true';
+        } else if (`${this.state}:${Boolean(reasoning)}` !== this.#renderedState) {
+            details.open = power_user.reasoning.auto_expand && this.state !== ReasoningState.Hidden;
+        }
+        this.#renderedState = `${this.state}:${Boolean(reasoning)}`;
 
         // Update the reasoning duration in the UI
         this.#updateReasoningTimeUI();
@@ -625,6 +658,10 @@ export class ReasoningHandler {
         // Make sure we reset dom elements if we are checking for a different message (shouldn't happen, but be sure)
         if (this.messageDom !== null && this.messageDom.getAttribute('mesid') !== messageId.toString()) {
             this.messageDom = null;
+            this.messageReasoningDetailsDom = null;
+            this.messageReasoningContentDom = null;
+            this.messageReasoningHeaderDom = null;
+            this.#renderedState = null;
         }
 
         // Cache the DOM elements once
@@ -982,8 +1019,11 @@ function registerReasoningSlashCommands() {
             closeMessageEditor('reasoning');
             updateMessageBlock(messageId, message);
 
-            if (isTrueBoolean(String(args.collapse))) $(`#chat [mesid="${messageId}"] .mes_reasoning_details`).removeAttr('open');
-            if (isFalseBoolean(String(args.collapse))) $(`#chat [mesid="${messageId}"] .mes_reasoning_details`).attr('open', '');
+            const collapse = String(args.collapse);
+            if (isTrueBoolean(collapse) || isFalseBoolean(collapse)) {
+                $(`#chat [mesid="${messageId}"] .mes_reasoning_details`)
+                    .each((_, detail) => setReasoningUserOpen(detail, !isTrueBoolean(collapse)));
+            }
             return message.extra.reasoning;
         },
     }));
@@ -1170,7 +1210,7 @@ function registerReasoningSlashCommands() {
         unnamedArgumentList: reasoningVisibilityArgs,
         callback: (_args, value) => {
             const details = getReasoningDetailsElements(value.toString());
-            if (details) details.removeAttr('open');
+            details?.each((_, detail) => setReasoningUserOpen(detail, false));
             return '';
         },
     }));
@@ -1182,7 +1222,7 @@ function registerReasoningSlashCommands() {
         unnamedArgumentList: reasoningVisibilityArgs,
         callback: (_args, value) => {
             const details = getReasoningDetailsElements(value.toString());
-            if (details) details.attr('open', '');
+            details?.each((_, detail) => setReasoningUserOpen(detail, true));
             return '';
         },
     }));
@@ -1194,15 +1234,7 @@ function registerReasoningSlashCommands() {
         unnamedArgumentList: reasoningVisibilityArgs,
         callback: (_args, value) => {
             const details = getReasoningDetailsElements(value.toString());
-            if (!details) return '';
-            details.each(function () {
-                const $el = $(this);
-                if ($el.attr('open') !== undefined) {
-                    $el.removeAttr('open');
-                } else {
-                    $el.attr('open', '');
-                }
-            });
+            details?.each((_, detail) => setReasoningUserOpen(detail, !detail.open));
             return '';
         },
     }));
@@ -1251,6 +1283,9 @@ function setReasoningEventHandlers() {
             e.preventDefault();
             return;
         }
+        // Remember explicit choices; streaming and completion must not undo them.
+        e.preventDefault();
+        setReasoningUserOpen(details[0], !details[0].open);
 
         // If we are in message edit mode and reasoning area is closed, a click opens and edits it
         const mes = $(this).closest('.mes');
@@ -1331,6 +1366,7 @@ function setReasoningEventHandlers() {
         textarea.remove();
         syncChatSurfaceProjectionHold();
         if (newReasoning === message.extra.reasoning) {
+            updateReasoningUI(messageBlock);
             return;
         }
         updateReasoningFromValue(message, newReasoning);

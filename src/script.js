@@ -28,7 +28,7 @@ import {
 } from './tauri/main/services/chat-surface/chat-virtualization-state.js';
 import { isInlineDrawerContentOpen, setInlineDrawerContentOpen } from './scripts/tauri/perf/inline-drawer-motion.js';
 import { initializeCodeMirrorEditor } from './scripts/tauri/codemirror-editor.js';
-import { getStreamingRenderInterval, normalizeStreamingFps, shouldCommitStreamingMessage } from './scripts/tauri/perf/streaming-render-policy.js';
+import { getStreamingRenderInterval, normalizeStreamingFps } from './scripts/tauri/perf/streaming-render-policy.js';
 import {
     CHAT_COMMIT_REASON,
     initializeColdSwipes,
@@ -397,6 +397,7 @@ import { captureItemizedPromptsSaveSnapshot, clearItemizedPrompts, deleteItemize
 import { getSystemMessageByType, initSystemMessages, SAFETY_CHAT, sendSystemMessage, system_message_types, system_messages } from './scripts/system-messages.js';
 import { event_types, eventSource } from './scripts/events.js';
 import { initAccessibility } from './scripts/a11y.js';
+import { finishStreamingMessageText, renderStreamingMessageText } from './scripts/util/stream-fadein.js';
 import { initDomHandlers } from './scripts/dom-handlers.js';
 import { SimpleMutex } from './scripts/util/SimpleMutex.js';
 import { createGenerationIdleGate } from './scripts/util/generation-idle-gate.js';
@@ -4472,8 +4473,6 @@ class StreamingProcessor {
         this.messageDom = null;
         /** @type {HTMLElement} */
         this.messageTextDom = null;
-        /** @type {string|null} Last canonical message HTML committed during streaming. */
-        this.lastCommittedHtml = null;
         /** @type {HTMLElement} */
         this.messageTimerDom = null;
         /** @type {HTMLElement} */
@@ -4640,20 +4639,11 @@ class StreamingProcessor {
                 {},
                 false,
             );
-            if (
-                this.messageDom instanceof HTMLElement
-                && this.messageTextDom instanceof HTMLElement
-                && shouldCommitStreamingMessage({
-                    lastCommittedHtml: this.lastCommittedHtml,
-                    nextHtml: formattedText,
-                    final: isFinal,
+            if (this.messageTextDom instanceof HTMLElement) {
+                renderStreamingMessageText(this.messageTextDom, formattedText, {
                     fadeIn: power_user.stream_fade_in,
-                })
-            ) {
-                replaceTransientMesTextHtmlWithRuntimePolicy(this.messageDom, formattedText, {
-                    fadeIn: !isFinal && power_user.stream_fade_in,
+                    isFinal,
                 });
-                this.lastCommittedHtml = formattedText;
             }
 
             const timePassed = formatGenerationTimer(this.timeStarted, currentTime, currentTokenCount, this.reasoningHandler.getDuration(), this.timeToFirstToken);
@@ -4773,7 +4763,15 @@ class StreamingProcessor {
         this.abortController.abort();
         this.isStopped = true;
 
+        if (this.messageTextDom instanceof HTMLElement) {
+            finishStreamingMessageText(this.messageTextDom);
+        }
         this.markUIGenStopped();
+        try {
+            this.reasoningHandler.flushPendingRender(this.messageId);
+        } catch (error) {
+            console.error('Failed to flush reasoning display', error);
+        }
 
         const emitMessageEvents = !['swipe', 'impersonate', 'continue'].includes(this.type);
         if (emitMessageEvents) {

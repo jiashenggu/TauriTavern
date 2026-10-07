@@ -1,5 +1,8 @@
 import { morphdom } from '../../lib.js';
 
+const STREAMING_DETAILS_SELECTOR = 'details[data-streaming-open], details.draft-notes, details.custom-draft-notes';
+const streamingDetailsHosts = new WeakSet();
+
 /**
  * Check if the current browser supports native segmentation function.
  * @returns {boolean} True if the Segmenter is supported by the current browser.
@@ -38,7 +41,7 @@ export function segmentExistingTextInElement(htmlElement, granularity = 'word') 
         const textNode = /** @type {Text} */ (walker.currentNode);
 
         // Skip ancestors of code/pre
-        if (textNode.parentElement && textNode.parentElement.closest('pre, code')) {
+        if (textNode.parentElement && textNode.parentElement.closest('pre, code, style')) {
             continue;
         }
 
@@ -75,4 +78,46 @@ export function applyStreamFadeIn(messageTextElement, htmlContent) {
     const targetElement = /** @type {HTMLElement} */ (messageTextElement.cloneNode());
     segmentTextInElement(targetElement, htmlContent);
     morphdom(messageTextElement, targetElement);
+}
+
+export function finishStreamingMessageText(messageTextElement) {
+    for (const detail of messageTextElement.querySelectorAll(STREAMING_DETAILS_SELECTOR)) {
+        if (detail.dataset.streamingUserOpen === undefined) {
+            detail.open = false;
+        }
+    }
+}
+
+export function renderStreamingMessageText(messageTextElement, htmlContent, { fadeIn = false, isFinal = false } = {}) {
+    const userStates = Array.from(messageTextElement.querySelectorAll(STREAMING_DETAILS_SELECTOR), detail => detail.dataset.streamingUserOpen);
+
+    if (fadeIn) {
+        applyStreamFadeIn(messageTextElement, htmlContent);
+    } else {
+        messageTextElement.innerHTML = htmlContent;
+    }
+
+    const disclosures = messageTextElement.querySelectorAll(STREAMING_DETAILS_SELECTOR);
+    disclosures.forEach((detail, index) => {
+        const userOpen = userStates[index];
+        if (userOpen === undefined) {
+            delete detail.dataset.streamingUserOpen;
+        } else {
+            detail.dataset.streamingUserOpen = userOpen;
+        }
+        detail.open = userOpen === undefined ? !isFinal : userOpen === 'true';
+    });
+
+    if (disclosures.length && !streamingDetailsHosts.has(messageTextElement)) {
+        streamingDetailsHosts.add(messageTextElement);
+        messageTextElement.addEventListener('click', event => {
+            if (event.defaultPrevented || !(event.target instanceof Element) || event.target.closest('a, button, input, select, textarea')) {
+                return;
+            }
+            const detail = event.target.closest('summary')?.parentElement;
+            if (detail?.matches(STREAMING_DETAILS_SELECTOR) && messageTextElement.contains(detail)) {
+                detail.dataset.streamingUserOpen = String(!detail.open);
+            }
+        });
+    }
 }
