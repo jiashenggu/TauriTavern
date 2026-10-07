@@ -194,9 +194,9 @@ fn read_personas_with(
         let entry = entry.map_err(io_error)?;
         let path = entry.path();
         if !entry.file_type().map_err(io_error)?.is_file()
-            || !mime_guess::from_path(&path)
+            || mime_guess::from_path(&path)
                 .first()
-                .is_some_and(|mime| mime.type_() == "image")
+                .is_none_or(|mime| mime.type_() != "image")
         {
             continue;
         }

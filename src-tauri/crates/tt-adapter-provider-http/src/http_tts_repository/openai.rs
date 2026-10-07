@@ -158,10 +158,10 @@ fn normalize_electronhub_payload(payload: &mut Map<String, Value>) {
     if payload.get("speed").is_none_or(Value::is_null) {
         payload.insert("speed".to_string(), json!(1));
     }
-    if !payload
+    if payload
         .get("model")
         .and_then(Value::as_str)
-        .is_some_and(|model| !model.is_empty())
+        .is_none_or(|model| model.is_empty())
     {
         payload.insert("model".to_string(), json!("tts-1"));
     }
