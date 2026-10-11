@@ -249,6 +249,7 @@ async fn repository_round_trips_run_workspace_and_event() {
         .read_events(
             &run.id,
             AgentRunEventReadQuery {
+                event_types: None,
                 after_seq: Some(1),
                 before_seq: None,
                 limit: 10,
@@ -266,6 +267,7 @@ async fn repository_round_trips_run_workspace_and_event() {
         .read_events(
             &run.id,
             AgentRunEventReadQuery {
+                event_types: None,
                 after_seq: None,
                 before_seq: Some(3),
                 limit: 1,
@@ -423,6 +425,7 @@ async fn repository_rejects_non_contiguous_event_sequences() {
         .read_events(
             &run.id,
             AgentRunEventReadQuery {
+                event_types: None,
                 after_seq: None,
                 before_seq: None,
                 limit: 10,
@@ -827,6 +830,7 @@ async fn delete_run_removes_workspace_index_and_summary_projection() {
             .read_events(
                 &run.id,
                 AgentRunEventReadQuery {
+                    event_types: None,
                     after_seq: Some(1),
                     before_seq: None,
                     limit: 10,

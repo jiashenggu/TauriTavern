@@ -48,6 +48,8 @@ export type AgentProfileDraft = Omit<AgentProfile, 'run' | 'context' | 'delegati
     context: {
         initialChatHistoryMessages: AgentProfileDraftNumber;
         includeActivatedWorldInfo: boolean;
+        initialWorkspaceFiles?: string[];
+        initialBaselineFiles?: string[];
     };
     delegation: AgentProfileDraftDelegation;
     tools: Omit<AgentProfile['tools'], 'maxRounds' | 'maxCallsPerRun' | 'mcpResultInlineCharLimit'> & {

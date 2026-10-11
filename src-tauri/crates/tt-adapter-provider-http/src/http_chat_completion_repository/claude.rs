@@ -244,6 +244,15 @@ impl ClaudeMessageAccumulator {
         raw_event: &[u8],
         on_delta: &mut dyn FnMut(ChatCompletionStreamDelta),
     ) -> Result<Option<Value>, DomainError> {
+        tt_domain::json_input::validate_slice(raw_event).map_err(|error| {
+            if error.is_data() {
+                DomainError::InvalidData(format!(
+                    "model.upstream_invalid_response: Claude JSON rejected: {error}"
+                ))
+            } else {
+                invalid_claude_stream(format!("event is invalid: {error}"))
+            }
+        })?;
         let event: ClaudeStreamEvent = serde_json::from_slice(raw_event)
             .map_err(|error| invalid_claude_stream(format!("event is invalid: {error}")))?;
 
@@ -291,8 +300,12 @@ impl ClaudeMessageAccumulator {
             ClaudeStreamEvent::ContentBlockStop { index } => {
                 let input_json = std::mem::take(&mut self.input_json);
                 if !input_json.is_empty() {
-                    let input = serde_json::from_str(&input_json).map_err(|error| {
-                        invalid_claude_stream(format!("tool input is not valid JSON: {error}"))
+                    let input = tt_domain::json_input::from_str(&input_json).map_err(|error| {
+                        if error.is_data() {
+                            DomainError::InvalidData(format!("model.upstream_invalid_response: Claude tool input rejected: {error}"))
+                        } else {
+                            invalid_claude_stream(format!("tool input is not valid JSON: {error}"))
+                        }
                     })?;
                     self.block_mut(index)?
                         .as_object_mut()

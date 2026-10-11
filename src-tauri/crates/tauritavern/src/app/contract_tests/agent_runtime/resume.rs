@@ -106,9 +106,8 @@ async fn agent_runtime_resume_retries_metadata_without_republishing_or_calling_m
             model_tool_call(
                 "commit",
                 "workspace_commit",
-                json!({ "path": "output/main.md" }),
+                json!({ "path": "output/main.md", "finish": true }),
             ),
-            model_tool_call("finish", "workspace_finish", json!({})),
         ])],
     );
     let profile = resolve_contract_profile(&fixture).await;

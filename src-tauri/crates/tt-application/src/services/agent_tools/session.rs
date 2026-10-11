@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, hash_map::Entry};
 
 use tt_domain::models::skill::{SkillIndexEntry, SkillScope};
+use tt_domain::text_lines::TextLineSelection;
 use tt_ports::repositories::workspace_repository::WorkspaceFile;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,6 +11,8 @@ pub struct WorkspaceReadState {
     pub sha256: String,
     pub full_read: bool,
     observed_texts: Vec<String>,
+    #[serde(default)]
+    line_ranges: Vec<(usize, usize)>,
     patch_requires_full_read: bool,
 }
 
@@ -19,6 +22,7 @@ impl WorkspaceReadState {
             sha256,
             full_read,
             observed_texts: Vec::new(),
+            line_ranges: Vec::new(),
             patch_requires_full_read: false,
         }
     }
@@ -36,7 +40,7 @@ impl WorkspaceReadState {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentToolSession {
     #[serde(skip)]
@@ -74,6 +78,7 @@ impl AgentToolSession {
                 sha256: file.sha256.clone(),
                 full_read,
                 observed_texts: Vec::new(),
+                line_ranges: Vec::new(),
                 patch_requires_full_read,
             },
         );
@@ -95,6 +100,7 @@ impl AgentToolSession {
                         sha256: file.sha256.clone(),
                         full_read: false,
                         observed_texts: Vec::new(),
+                        line_ranges: Vec::new(),
                         patch_requires_full_read,
                     };
                 }
@@ -110,6 +116,44 @@ impl AgentToolSession {
                 entry.insert(state);
             }
         }
+    }
+
+    pub fn remember_file_selection(
+        &mut self,
+        file: &WorkspaceFile,
+        selection: &TextLineSelection,
+    ) -> bool {
+        self.remember_file_read(file, !selection.truncated(), &selection.content);
+        let state = self
+            .read_state
+            .get_mut(file.path.as_str())
+            .expect("read was recorded");
+        if state.full_read || selection.line_truncated {
+            return state.full_read;
+        }
+        state
+            .line_ranges
+            .push((selection.start_line, selection.end_line));
+        state.line_ranges.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for &(start, end) in &state.line_ranges {
+            if let Some(previous) = merged
+                .last_mut()
+                .filter(|previous| start <= previous.1.saturating_add(1))
+            {
+                previous.1 = previous.1.max(end);
+            } else {
+                merged.push((start, end));
+            }
+        }
+        state.line_ranges = merged;
+        if state.line_ranges.as_slice() == [(1, selection.total_lines)] {
+            state.full_read = true;
+            state.patch_requires_full_read = false;
+            state.observed_texts.clear();
+            state.line_ranges.clear();
+        }
+        state.full_read
     }
 
     pub fn remember_partial_patch(
@@ -136,6 +180,7 @@ impl AgentToolSession {
                 sha256: file.sha256.clone(),
                 full_read: false,
                 observed_texts,
+                line_ranges: Vec::new(),
                 patch_requires_full_read: false,
             },
         );
@@ -168,5 +213,55 @@ impl AgentToolSession {
             .iter()
             .find(|skill| skill.name == name)
             .map(|skill| skill.scope.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tt_domain::models::agent::WorkspacePath;
+
+    #[test]
+    fn paged_reads_require_gap_free_current_version_coverage_after_restore() {
+        let file = WorkspaceFile {
+            path: WorkspacePath::parse("persist/state.json").unwrap(),
+            text: "first\nmiddle\nlast".into(),
+            bytes: 17,
+            sha256: "version-one".into(),
+        };
+        let page = |file: &WorkspaceFile, line| {
+            TextLineSelection::select(&file.text, line, Some(1), 1, 100).unwrap()
+        };
+        let mut session = AgentToolSession::default();
+        assert!(!session.remember_file_selection(&file, &page(&file, 1)));
+        assert!(!session.remember_file_selection(&file, &page(&file, 3)));
+        session = serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
+        assert!(!session.remember_file_selection(&file, &page(&file, 1)));
+        let newer = WorkspaceFile {
+            text: "changed\nmiddle\nlast".into(),
+            sha256: "version-two".into(),
+            bytes: 19,
+            ..file.clone()
+        };
+        assert!(!session.remember_file_selection(&newer, &page(&newer, 2)));
+        assert!(!session.remember_file_selection(&newer, &page(&newer, 1)));
+        assert!(session.remember_file_selection(&newer, &page(&newer, 3)));
+    }
+
+    #[test]
+    fn truncated_lines_never_complete_paged_read_coverage() {
+        let file = WorkspaceFile {
+            path: WorkspacePath::parse("scratch/long.txt").unwrap(),
+            text: "abcdef\nlast".into(),
+            bytes: 11,
+            sha256: "version".into(),
+        };
+        let mut session = AgentToolSession::default();
+        let truncated = TextLineSelection::select(&file.text, 1, Some(1), 1, 3).unwrap();
+        assert!(!session.remember_file_selection(&file, &truncated));
+        let end = TextLineSelection::select(&file.text, 2, Some(1), 1, 100).unwrap();
+        assert!(!session.remember_file_selection(&file, &end));
+        let first = TextLineSelection::select(&file.text, 1, Some(1), 1, 100).unwrap();
+        assert!(session.remember_file_selection(&file, &first));
     }
 }

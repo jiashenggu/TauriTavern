@@ -11,9 +11,23 @@ export function normalizeAgentContextPolicy(value = {}) {
         throw new Error('agent.context_history_invalid: initialChatHistoryMessages must be negative for full history, zero for no initial history, or positive for a recent-message window');
     }
 
+    const filePolicies = {};
+    for (const key of ['initialWorkspaceFiles', 'initialBaselineFiles']) {
+        const files = source[key] ?? [];
+        if (!Array.isArray(files) || files.length > 8 || files.some(path => typeof path !== 'string' || !path.trim())) {
+            throw new Error(`agent.context_files_invalid: ${key} must contain at most8 nonempty paths`);
+        }
+        const paths = files.map(path => path.trim());
+        if (new Set(paths).size !== paths.length) throw new Error('agent.context_files_invalid: duplicate initial file');
+        if (key === 'initialBaselineFiles' && paths.some(path => !path.startsWith('persist/'))) {
+            throw new Error('agent.context_baseline_invalid: baseline files must be under persist/');
+        }
+        if (paths.length) filePolicies[key] = paths;
+    }
     return {
         initialChatHistoryMessages: initialChatHistoryMessages < 0 ? -1 : initialChatHistoryMessages,
         includeActivatedWorldInfo: source.includeActivatedWorldInfo !== false,
+        ...filePolicies,
     };
 }
 

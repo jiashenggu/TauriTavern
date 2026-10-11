@@ -50,6 +50,7 @@ impl InvocationFrame {
                 seen_child_results: HashSet::new(),
                 drift_attempts: 0,
                 blocked_reason: None,
+                context_loaded: false,
             },
         }
     }
@@ -62,6 +63,8 @@ pub(super) struct InvocationProgress {
     pub max_rounds: usize,
     pub step: InvocationStep,
     pub session: AgentToolSession,
+    #[serde(default)]
+    pub context_loaded: bool,
     pub gate: ToolRequestGate,
     pub seen_child_results: HashSet<String>,
     pub drift_attempts: usize,

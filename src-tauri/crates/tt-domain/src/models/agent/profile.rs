@@ -202,6 +202,10 @@ pub struct AgentContextPolicy {
     pub initial_chat_history_messages: i64,
     #[serde(default = "default_agent_include_activated_world_info")]
     pub include_activated_world_info: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_workspace_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_baseline_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -404,6 +408,8 @@ impl Default for AgentContextPolicy {
         Self {
             initial_chat_history_messages: DEFAULT_AGENT_INITIAL_CHAT_HISTORY_MESSAGES,
             include_activated_world_info: true,
+            initial_workspace_files: Vec::new(),
+            initial_baseline_files: Vec::new(),
         }
     }
 }

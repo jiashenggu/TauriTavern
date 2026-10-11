@@ -113,6 +113,7 @@ fn run_commit_ledger_preserves_commit_payloads() {
 
     ledger.record(
         &path,
+        "body-sha",
         AgentChatCommitMode::Replace,
         Some("msg_1".to_string()),
         1,
@@ -123,6 +124,17 @@ fn run_commit_ledger_preserves_commit_payloads() {
     assert_eq!(ledger.explicit_count(), 0);
     assert!(!ledger.has_explicit_commit());
     assert_eq!(ledger.latest_message_id(), Some("msg_1"));
+    let encoded = serde_json::to_value(&ledger).unwrap();
+    let restored: RunCommitLedger = serde_json::from_value(encoded.clone()).unwrap();
+    assert!(restored.matches_delivered_body(path.as_str(), "body-sha"));
+    let mut legacy = encoded;
+    legacy["commits"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("sha256");
+    let legacy: RunCommitLedger = serde_json::from_value(legacy).unwrap();
+    assert!(!legacy.matches_delivered_body(path.as_str(), "body-sha"));
+    assert_eq!(legacy.latest_message_id(), Some("msg_1"));
     assert_eq!(
         ledger.preserved_commits(),
         vec![json!({

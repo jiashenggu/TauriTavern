@@ -62,6 +62,8 @@ Profile 面板中的 Model Target 会物化为 LLM Connection。连接的端点�
 | `instructions.agentSystemPrompt` | Agent 的工作指令；省略时使用默认指令 |
 | `context.initialChatHistoryMessages` | 初始历史楼数：`-1` 不主动裁剪，`0` 不注入，正数取最近 N 楼；仍受模型上下文预算限制 |
 | `context.includeActivatedWorldInfo` | 是否在初始提示词中包含已激活世界书 |
+| `context.initialWorkspaceFiles` | 可选的开场文件路径列表，最多8个；默认空列表，不自动注入文件 |
+| `context.initialBaselineFiles` | 可选的持久基准文件列表，最多8个可见 persist/ 文件；默认关闭，在 Run 初始化时保存到只读 baseline/ |
 | `tools.allow` / `deny` | 可用工具，deny 优先 |
 | `tools.maxRounds` / `maxCallsPerRun` / `maxCallsPerTool` | 每个 Invocation 的轮数与调用预算 |
 | `tools.toolDescriptions` | 替换模型看到的工具或参数描述 |
@@ -71,6 +73,8 @@ Profile 面板中的 Model Target 会物化为 LLM Connection。连接的端点�
 | `run.stream` / `modelRetry` | 流式预览与模型请求重试 |
 | `run.directRunnable` | 是否出现在直接运行的 Agent 选择列表 |
 | `output.artifacts` | 输出文件；当前正文目标为 `messageBody` |
+
+`initialWorkspaceFiles` 仅在新 Invocation 的首次模型请求前加载，沿用本 Invocation 的文件权限、行预览上限和读取记录，并要求可用的 `workspace.read_file` 能力。提供给模型的是带 SHA/fullRead 的资料消息，不是系统指令；完整视图可直接用于后续冲突检查，部分视图仍需补读。缺失文件明确报告未找到，权限和其他错误停止加载；合计资料正文上限96,000字符。恢复运行不重复注入，旧 Profile 省略此字段时行为不变。可在高级 JSON 中配置，例如 `"initialWorkspaceFiles": ["persist/state.json"]`。
 
 工具字段使用稳定 ID，例如 `builtin:workspace.read_file` 或 `mcp/<registration-id>:<tool-name>`。模型看到的调用名称由 runtime 生成，见 [工具](ToolSystem.md)。
 

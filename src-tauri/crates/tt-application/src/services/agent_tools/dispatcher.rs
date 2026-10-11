@@ -53,6 +53,7 @@ pub(crate) enum AgentToolEffect {
         path: WorkspacePath,
         mode: AgentChatCommitMode,
         reason: Option<String>,
+        finish: bool,
     },
     TaskReturned {
         status: tt_domain::models::agent::AgentTaskStatus,
@@ -92,25 +93,6 @@ impl AgentToolDispatcher {
             skill_service,
             skill_script_engine,
         }
-    }
-
-    pub(crate) async fn dispatch(
-        &self,
-        run_id: &str,
-        call: &ToolInvocation,
-        args: &Map<String, Value>,
-        session: &mut AgentToolSession,
-        profile: &ResolvedAgentProfile,
-    ) -> Result<AgentToolDispatchOutcome, ApplicationError> {
-        self.dispatch_with_model_workspace_repository(
-            run_id,
-            call,
-            args,
-            session,
-            profile,
-            self.workspace_repository.as_ref(),
-        )
-        .await
     }
 
     pub(crate) async fn dispatch_with_model_workspace_repository(

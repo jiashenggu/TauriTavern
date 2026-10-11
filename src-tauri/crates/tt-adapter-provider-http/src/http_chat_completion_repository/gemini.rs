@@ -69,12 +69,19 @@ impl GeminiStreamAccumulator {
         raw_event: &[u8],
         on_delta: &mut dyn FnMut(ChatCompletionStreamDelta),
     ) -> Result<(), DomainError> {
-        let mut event = match serde_json::from_slice::<Value>(raw_event)
-            .map_err(|error| invalid_stream(format!("event is not valid JSON: {error}")))?
-        {
-            Value::Object(event) => event,
-            _ => return Err(invalid_stream("event must be an object")),
-        };
+        let mut event =
+            match tt_domain::json_input::from_slice::<Value>(raw_event).map_err(|error| {
+                if error.is_data() {
+                    DomainError::InvalidData(format!(
+                        "model.upstream_invalid_response: Gemini JSON rejected: {error}"
+                    ))
+                } else {
+                    invalid_stream(format!("event is not valid JSON: {error}"))
+                }
+            })? {
+                Value::Object(event) => event,
+                _ => return Err(invalid_stream("event must be an object")),
+            };
 
         if let Some(error) = event.get("error").filter(|error| !error.is_null()) {
             return Err(invalid_stream(format!(
@@ -208,6 +215,18 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn stream_rejects_ambiguous_tool_arguments_before_emitting_deltas() {
+        let event = br#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"workspace_apply_patch","args":{"value":{"\u0024serde_json::private::Number":"123"}}}}]}}]}"#;
+        let mut accumulator = GeminiStreamAccumulator::default();
+        let mut deltas = Vec::new();
+        let error = accumulator
+            .apply_event(event, &mut |delta| deltas.push(delta))
+            .unwrap_err();
+        assert!(matches!(error, DomainError::InvalidData(_)));
+        assert!(deltas.is_empty());
+    }
 
     #[test]
     fn stream_accumulates_final_and_projects_tool_call() {

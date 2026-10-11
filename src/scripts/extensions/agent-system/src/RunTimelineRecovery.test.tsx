@@ -22,7 +22,7 @@ test('presentation save failures remain visible and can be retried without resta
         mode: 'active',
         deps: {
             readEvents: () => Promise.resolve({ events: [],
-                timelineProjection: { foregroundInvocationIds: [], invocations: [], delegationEdges: [] },
+                timelineProjection: { foregroundInvocationIds: [], invocations: [], delegationEdges: [], replyPublication: { seq: 0, pending: false } },
             }),
             reportError: error => { throw error; },
             tr,

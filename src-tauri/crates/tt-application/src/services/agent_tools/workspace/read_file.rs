@@ -113,8 +113,7 @@ pub(in crate::services::agent_tools) async fn read_file(
         }
     };
     let selected_metrics = TextMetrics::from_text(&selection.content);
-    let full_read = !selection.truncated();
-    session.remember_file_read(&file, full_read, &selection.content);
+    let full_read = session.remember_file_selection(&file, &selection);
 
     let mut content = format!(
         "{} lines {}-{} of {}, chars {} of {}, words {} of {}{}",
@@ -137,7 +136,10 @@ pub(in crate::services::agent_tools) async fn read_file(
         content.push('\n');
         content.push_str(&numbered);
     }
-    if let Some(next_start_line) = selection.next_start_line() {
+    if full_read && selection.truncated() {
+        content.push_str("\nAll lines of this unchanged file version have now been read across pages; fullRead=true.");
+    }
+    if !full_read && let Some(next_start_line) = selection.next_start_line() {
         content.push_str(&format!(
             "\n\nPreview ended before the file. Continue with start_line={next_start_line} and line_count={}.",
             selection.returned_line_count()

@@ -132,6 +132,7 @@ mod tests {
         let mut ledger = RunCommitLedger::default();
         ledger.record(
             &tt_domain::models::agent::WorkspacePath::parse("output/main.md").unwrap(),
+            "body-sha",
             tt_domain::models::agent::AgentChatCommitMode::Replace,
             Some("42".to_string()),
             3,

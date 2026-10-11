@@ -10,10 +10,22 @@ pub(super) fn render_openai_tools(
     tools
         .iter()
         .map(|tool| {
-            let mut function = json!({
-                "name": tool.model_alias.as_str(),
-                "parameters": sanitize_schema_for_provider(&tool.input_schema, adapter),
-            });
+            let native_json_schema = matches!(
+                adapter,
+                AgentProviderAdapter::Gemini | AgentProviderAdapter::GeminiInteractions
+            ) && requires_json_schema(&tool.input_schema);
+            let field = if native_json_schema && adapter == AgentProviderAdapter::Gemini {
+                "parametersJsonSchema"
+            } else {
+                "parameters"
+            };
+            let parameters = if native_json_schema {
+                tool.input_schema.clone()
+            } else {
+                sanitize_schema_for_provider(&tool.input_schema, adapter)
+            };
+            let mut function = json!({"name": tool.model_alias.as_str()});
+            function[field] = parameters;
             if let Some(description) = &tool.description {
                 function["description"] = Value::String(description.clone());
             }
@@ -23,6 +35,27 @@ pub(super) fn render_openai_tools(
             })
         })
         .collect()
+}
+
+fn requires_json_schema(schema: &Value) -> bool {
+    let Some(object) = schema.as_object() else {
+        return true;
+    };
+    if object.get("type").and_then(Value::as_str).is_none()
+        || ["oneOf", "anyOf", "allOf", "$ref", "not", "if", "const"]
+            .iter()
+            .any(|key| object.contains_key(*key))
+    {
+        return true;
+    }
+    let properties = object.get("properties").and_then(Value::as_object);
+    (object.get("type").and_then(Value::as_str) == Some("object")
+        && properties.is_none_or(|properties| properties.is_empty()))
+        || properties.is_some_and(|properties| properties.values().any(requires_json_schema))
+        || object.get("items").is_some_and(requires_json_schema)
+        || object
+            .get("additionalProperties")
+            .is_some_and(Value::is_object)
 }
 
 pub(super) fn sanitize_schema_for_provider(schema: &Value, adapter: AgentProviderAdapter) -> Value {

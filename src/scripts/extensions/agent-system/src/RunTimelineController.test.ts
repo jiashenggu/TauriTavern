@@ -44,7 +44,7 @@ function event(
 }
 
 function emptyProjection(): TimelineProjection {
-    return { foregroundInvocationIds: [], invocations: [], delegationEdges: [] };
+    return { foregroundInvocationIds: [], invocations: [], delegationEdges: [], replyPublication: { seq: 0, pending: false } };
 }
 
 async function flushMicrotasks(): Promise<void> {
@@ -53,6 +53,7 @@ async function flushMicrotasks(): Promise<void> {
 
 function subAgentProjection(): TimelineProjection {
     return {
+        replyPublication: { seq: 0, pending: false },
         foregroundInvocationIds: ['inv_root'],
         invocations: [
             {
@@ -163,6 +164,60 @@ test('active mode subscribes before reading the active snapshot and deduplicates
     expect(controller.getSnapshot().visible).toBe(false);
     controller.dispose();
     expect(state.unsubscribed).toBe(3);
+});
+
+test('visible reply stays pending until its state is saved and survives terminal failure', async () => {
+    const { controller, state } = activeHarness();
+    await controller.init();
+    state.eventListener?.(event(1, 'chat_commit_completed', { isExplicit: false, path: 'output/main.md' }));
+    expect(controller.getSnapshot().headerTitle).toBe('timelineOutputReady');
+    expect(controller.getSnapshot().isRunning).toBe(true);
+    state.eventListener?.(event(2, 'model_call_attempt_started', { invocationId: 'inv_root', round: 2, attempt: 1 }));
+    expect(controller.getSnapshot().headerTitle).toBe('timelineOutputReady');
+    state.eventListener?.(event(3, 'persistent_state_metadata_updated', { stateId: 'saved' }));
+    expect(controller.getSnapshot().headerTitle).not.toBe('timelineOutputReady');
+    state.eventListener?.(event(4, 'chat_commit_completed', { isExplicit: true, path: 'output/main.md' }));
+    const failure = event(5, 'run_partial_success', {});
+    state.eventListener?.(failure);
+    state.runStateListener?.({ activeRun: null, lastEvent: failure });
+    expect(controller.getSnapshot().headerSubtitle).toBe('timelineOutputStateUnsaved');
+    expect(controller.getSnapshot().isRunning).toBe(false);
+    controller.dispose();
+});
+
+test('pending reply status survives pagination and stale projection responses', async () => {
+    const history = Array.from({ length: 242 }, (_, index) => event(index + 1,
+        index === 0 ? 'chat_commit_completed' : index === 241 ? 'run_partial_success' : 'tool_call_completed', {}));
+    const projection = { ...emptyProjection(), replyPublication: { seq: 1, pending: true } };
+    let resolveOlder: ((value: TimelineReadResult) => void) | undefined;
+    const { controller, state } = activeHarness({
+        readEvents: input => input.beforeSeq === Number.MAX_SAFE_INTEGER
+            ? Promise.resolve({ events: history.slice(-240), timelineProjection: projection })
+            : new Promise(resolve => { resolveOlder = resolve; }),
+    });
+    await controller.init();
+    expect(controller.getSnapshot().headerSubtitle).toBe('timelineOutputStateUnsaved');
+    const older = controller.loadOlder();
+    state.eventListener?.(event(243, 'persistent_state_metadata_updated', {}));
+    expect(controller.getSnapshot().headerSubtitle).not.toBe('timelineOutputStateUnsaved');
+    resolveOlder?.({ events: history.slice(0, 2), timelineProjection: projection });
+    await older;
+    expect(controller.getSnapshot().headerSubtitle).not.toBe('timelineOutputStateUnsaved');
+    state.eventListener?.(event(244, 'chat_commit_completed', {}));
+    expect(controller.getSnapshot().headerSubtitle).toBe('timelineOutputStateUnsaved');
+    controller.dispose();
+
+    const completed = createRunTimelineController({
+        mode: 'history', rootId: 'history', run: { runId: 'run-1' }, requestClose() {},
+        deps: {
+            tr, reportError(error) { throw error; },
+            readEvents: () => Promise.resolve({ events: [event(1, 'chat_commit_completed', {}), event(300, 'run_completed', {})],
+                timelineProjection: { ...projection, replyPublication: { seq: 299, pending: false } } }),
+        },
+    });
+    await completed.init();
+    expect(completed.getSnapshot().headerSubtitle).not.toBe('timelineOutputStateUnsaved');
+    completed.dispose();
 });
 
 test('projection refresh coalesces structural events into one trailing read', async () => {

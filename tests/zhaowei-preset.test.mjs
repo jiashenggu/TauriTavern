@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
+import { materializeInitialChatHistoryMessages } from '../src/scripts/tauritavern/agent/agent-context-policy.js';
 import * as injections from '../src/scripts/prompt-injections.js';
 import * as orderUtils from '../src/scripts/prompt-manager-order-utils.js';
 import { exportZhaoweiPreset } from '../scripts/export-zhaowei-preset.mjs';
@@ -39,7 +40,7 @@ function assemblyFixture(settings = preset, variables = {}) {
     const errors = [];
     const context = vm.createContext({
         console: { debug() {}, log() {}, warn: (...args) => errors.push(args.join(' ')), error: (...args) => errors.push(args.join(' ')) },
-        structuredClone, setTimeout, clearTimeout, performance, ...injections, ...orderUtils,
+        structuredClone, setTimeout, clearTimeout, performance, materializeInitialChatHistoryMessages, ...injections, ...orderUtils,
         power_user: { console_log_prompts: true, pin_examples: false, persona_description_position: 0 },
         t: parts => Array.isArray(parts) ? parts.join('') : parts,
         debounce: f => f, debounce_timeout: { short: 0 }, getSortableDelay: () => 0,
@@ -109,7 +110,7 @@ function regexFixture() {
 test('distributable preset contains only portable fields and has complete unique prompt ordering', () => {
     assert.ok(!raw.startsWith('\uFEFF'));
     assert.deepEqual(exportZhaoweiPreset(preset), preset);
-    assert.equal(preset.prompts.length, 25);
+    assert.equal(preset.prompts.length, 26);
     const ids = preset.prompts.map(p => p.identifier);
     assert.equal(new Set(ids).size, ids.length);
     for (const group of preset.prompt_order) {
@@ -145,7 +146,7 @@ test('humanity and style instructions preserve task, knowledge and player bounda
     assert.equal(style.enabled, false);
     assert.equal(style.role, 'system');
     assert.ok(style.content.includes('文风要求：\n\n参考片段：'));
-    for (const phrase of ['不继承范文中的人物、事件', '不覆盖玩家权限', '纯元指令、摘要、提取、独立 MVU']) assert.ok(style.content.includes(phrase));
+    for (const phrase of ['不继承范文中的人物、事件', '不覆盖玩家权限', '纯元指令及摘要、提取、格式修复等后台任务']) assert.ok(style.content.includes(phrase));
     for (const phrase of ['角色有正在过的生活', '允许局部修复', '不为展示缺点']) assert.ok(prompt('consistent-world').content.includes(phrase));
     for (const phrase of ['对白先回应对方实际说了什么', '不必再由旁白翻译', '不把每轮结尾']) assert.ok(prompt('consistent-prose').content.includes(phrase));
 });
@@ -240,6 +241,48 @@ test('one planning toggle controls draft instructions without removing time, sty
     }
 });
 
+test('one MVU toggle isolates protocol guidance without disabling state, memory or card protocols', async () => {
+    const mvuId = 'consistent-mvu';
+    const assertUpdateSafeguards = messages => {
+        const stateMessages = messages.filter(message => message.role === 'system'
+            && message.content.startsWith('剧情结果、既有状态栏和记忆记录'));
+        assert.equal(stateMessages.length, 1);
+        for (const safeguard of [
+            '只有本轮明确分配更新职责并提供执行或输出协议时，才生成相应更新',
+            '路径父节点不存在、数组位置改变或类型不符时',
+            '协议要求多个操作共同成立时，保持其关联',
+            '不把条件检查当作已生效的保护或重试安全保证',
+            '不重演交易、重复扣款或重复发放',
+            '没有执行反馈时不声称已经验证保存结果',
+        ]) assert.ok(stateMessages[0].content.includes(safeguard), `Missing active safeguard: ${safeguard}`);
+    };
+    const protocol = /\bMVU\b|JSON\s*Patch|UpdateVariable|RFC\s*6902|增量协议|独立解析模式|变量更新命令/;
+    const settings = structuredClone(preset);
+    for (const id of [styleId, 'consistent-planning']) settings.prompt_order[0].order.find(item => item.identifier === id).enabled = true;
+    const initial = await assemblyFixture(settings).run();
+    assertUpdateSafeguards(initial.messages);
+    assert.equal(initial.messages.filter(message => protocol.test(message.content)).length, 0, 'Default prose request contains MVU guidance');
+    const option = settings.prompt_order[0].order.find(item => item.identifier === mvuId);
+    assert.ok(option && !option.enabled);
+    for (const enabled of [true, false]) {
+        option.enabled = enabled;
+        const { messages } = await assemblyFixture(settings).run();
+        assertUpdateSafeguards(messages);
+        assert.deepEqual(messages.filter(message => protocol.test(message.content)).map(message => message.content), enabled ? [prompt(mvuId).content] : []);
+        for (const id of ['consistent-state', 'consistent-time', 'consistent-output', 'consistent-player', styleId]) {
+            assert.equal(messages.filter(message => message.content === prompt(id).content).length, 1, id);
+        }
+        assert.deepEqual(messages.filter(message => message.content.startsWith('HISTORY_')).map(message => message.content), ['HISTORY_OLD', 'HISTORY_MIDDLE', 'HISTORY_NEW']);
+    }
+    const fixture = assemblyFixture(settings);
+    const cardProtocol = '<status>CHARACTER_STATUS</status><UpdateVariable><JSONPatch>[]</JSONPatch></UpdateVariable>';
+    fixture.input.promptInputs.worldInfoBefore = cardProtocol;
+    const { messages } = await fixture.run();
+    assertUpdateSafeguards(messages);
+    assert.ok(messages.some(message => message.content.includes(cardProtocol)));
+    assert.ok(!messages.some(message => message.content === prompt(mvuId).content));
+});
+
 test('enabled style is sent exactly once between prose and state; quiet task retains final position', async () => {
     const enabled = structuredClone(preset);
     enabled.prompts.find(p => p.identifier === styleId).enabled = true;
@@ -257,6 +300,39 @@ test('enabled style is sent exactly once between prose and state; quiet task ret
         assert.ok(index('STYLE_SENTINEL') > index(prompt('consistent-prose').content));
         assert.ok(index('STYLE_SENTINEL') < index(prompt('consistent-state').content));
         if (quiet) assert.deepEqual(messages.at(-1), { role: 'system', content: 'Return only {"ok":true}' });
+    }
+});
+
+test('Agent preset assembles persistent-memory rules and optional context without re-enabling the public outline', async () => {
+    const agentPreset = JSON.parse(readFileSync(new URL('../docs/presets/照微·Agent.json', import.meta.url), 'utf8'));
+    const profile = JSON.parse(readFileSync(new URL('../docs/presets/zhaowei-agent.profile.json', import.meta.url), 'utf8'));
+    for (const agentMode of [true, false]) {
+        const f = assemblyFixture(agentPreset, { shenzhiyan_driver: 'ACTIVATED_RULES' });
+        f.input.agentMode = agentMode;
+        f.input.agentContextPolicy = profile.context;
+        f.input.agentSystemPrompt = 'RUNTIME_TOOL_CONTRACT';
+        f.input.promptInputs.extensionPrompts = {
+            guidance: { value: 'OPTIONAL_EXTENSION_GUIDANCE', position: 1, depth: 1, role: 0 },
+        };
+        if (!agentMode) {
+            f.input.generationType = 'quiet';
+            f.input.promptInputs.quietPrompt = 'Return only the requested JSON';
+        }
+        const historyBefore = structuredClone(f.input.promptInputs.messages);
+        const { messages } = await f.run();
+        if (agentMode) assert.deepEqual(f.input.promptInputs.messages, historyBefore);
+        assert.equal(messages.filter(message => message.content === 'RUNTIME_TOOL_CONTRACT').length, agentMode ? 1 : 0);
+        for (const entry of agentPreset.prompt_order[0].order.filter(entry => entry.enabled)) {
+            const p = agentPreset.prompts.find(prompt => prompt.identifier === entry.identifier);
+            if (!p.marker && p.content) assert.equal(messages.filter(message => message.content === f.expand(p.content)).length, 1, p.identifier);
+        }
+        const outline = agentPreset.prompts.find(prompt => prompt.identifier === 'consistent-planning');
+        assert.ok(!messages.some(message => message.content === outline.content));
+        for (const text of ['OPTIONAL_EXTENSION_GUIDANCE', 'MARK_WORLD_BEFORE', 'MARK_WORLD_AFTER', 'ACTIVATED_RULES']) {
+            assert.equal(messages.filter(message => message.content.includes(text)).length, 1, text);
+        }
+        assert.deepEqual(messages.filter(message => message.content.startsWith('HISTORY_')).map(message => message.content), ['HISTORY_OLD', 'HISTORY_MIDDLE', 'HISTORY_NEW']);
+        if (!agentMode) assert.deepEqual(messages.at(-1), { role: 'system', content: 'Return only the requested JSON' });
     }
 });
 

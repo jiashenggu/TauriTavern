@@ -163,8 +163,76 @@ impl AgentRuntimeService {
             .await?;
 
             let builtin_name = call.tool_id.is_builtin().then_some(tool_name);
+            if builtin_name == Some("chat.search") && args.get("read_matches").and_then(Value::as_bool) == Some(true)
+                && !prepared.tool_turn.tools().iter().any(|id| id.is_builtin() && id.native_name() == "chat.read_messages") {
+                return Ok(recoverable_tool_error(call, "chat.read_permission_required", "read_matches requires an available chat.read_messages tool", started.elapsed().as_millis()));
+            }
+            let finishing_task = builtin_name == Some("workspace.write_file") && args.get("finish_task").and_then(Value::as_bool) == Some(true);
+            let task_return_available = exit_policy == AgentInvocationExitPolicy::TaskReturnRequired
+                && prepared.tool_turn.tools().iter().any(|id| id.is_builtin() && id.native_name() == TASK_RETURN);
+            let finishing_commit = builtin_name == Some("workspace.commit") && args.get("finish").and_then(Value::as_bool) == Some(true);
+            let finish_available = exit_policy == AgentInvocationExitPolicy::RunFinishAllowed
+                && prepared.tool_turn.tools().iter().any(|id| id.is_builtin() && id.native_name() == WORKSPACE_FINISH);
+            let state_mutation = matches!(builtin_name, Some("workspace.write_file" | "workspace.apply_patch"));
+            if state_mutation && args.get("finalize").is_some_and(|value| !value.is_boolean()) {
+                return Ok(recoverable_tool_error(call, "tool.invalid_arguments", "finalize must be a boolean", started.elapsed().as_millis()));
+            }
+            let finalizing_state = state_mutation && args.get("finalize").and_then(Value::as_bool) == Some(true);
+            let body_sha = if finalizing_state {
+                let can_commit = prepared.tool_turn.tools().iter().any(|id| id.is_builtin() && id.native_name() == "workspace.commit");
+                if !finish_available || !can_commit || !is_last_call || tool_call_index != 0 || finishing_task || !args.get("path").and_then(Value::as_str).is_some_and(|path| path.starts_with("persist/")) {
+                    return Ok(recoverable_tool_error(call, "agent.finalize_not_ready", "finalize requires a sole persist mutation, commit/finish permissions, no finish_task, and previously delivered reviewed body", started.elapsed().as_millis()));
+                }
+                match self.reviewed_body_sha(prepared, session).await {
+                    Ok(sha) if commit_ledger.matches_delivered_body(&profile.output.message_body_path, &sha) => Some(sha),
+                    Ok(_) => return Ok(recoverable_tool_error(call, "agent.finalize_not_ready", "finalize requires the unchanged complete body from a confirmed replace commit; append fragments, unpublished changes, and legacy commits without a recorded SHA require explicit publication first", started.elapsed().as_millis())),
+                    Err(ApplicationError::ValidationError(message)) | Err(ApplicationError::NotFound(message)) => return Ok(recoverable_tool_error(call, "agent.finalize_not_ready", &message, started.elapsed().as_millis())),
+                    Err(error) => return Err(error),
+                }
+            } else { None };
+            let mut capabilities = Vec::new();
+            if builtin_name == Some("chat.search") && args.get("read_matches").and_then(Value::as_bool) == Some(true) {
+                capabilities.push(ToolId::builtin("chat.read_messages")?);
+            }
+            if finishing_task && task_return_available && is_last_call {
+                capabilities.push(ToolId::builtin(TASK_RETURN)?);
+            }
+            if finishing_commit && finish_available && is_last_call {
+                capabilities.push(ToolId::builtin(WORKSPACE_FINISH)?);
+            }
+            if finalizing_state {
+                capabilities.extend([ToolId::builtin("workspace.commit")?, ToolId::builtin(WORKSPACE_FINISH)?]);
+            }
+            if let Err(error) = gate.check_capabilities(&prepared.tool_snapshot, &prepared.tool_turn, &capabilities) {
+                if builtin_name == Some("chat.search") {
+                    let mut search_args = args.clone();
+                    search_args.insert("read_matches".into(), Value::Bool(false));
+                    let repository = InvocationWorkspaceRepository::new(self.workspace_repository.as_ref(), profile);
+                    started_tool = true;
+                    let mut outcome = self.tool_dispatcher.dispatch_with_model_workspace_repository(
+                        run_id, call, &search_args, session, profile, &repository,
+                    ).await?;
+                    if !outcome.result.is_error {
+                        let message = error.to_string();
+                        outcome.result.content = format!("Search succeeded, but reading its matches failed: {message}\n\n{}", outcome.result.content);
+                        outcome.result.structured["readError"] = json!({"code":error.code(),"message":message});
+                        outcome.result.is_error = true;
+                        outcome.result.error_code = Some(error.code().into());
+                    }
+                    return Ok(outcome);
+                }
+                return Ok(recoverable_tool_error(call, error.code(), &error.to_string(), started.elapsed().as_millis()));
+            }
+            if builtin_name == Some("chat.search") {
+                gate.reserve_capabilities(&prepared.tool_snapshot, &prepared.tool_turn, &capabilities)
+                    .map_err(|error| ApplicationError::ValidationError(error.to_string()))?;
+            }
             started_tool = true;
-            let dispatch_result = if !is_last_call && builtin_name.is_some_and(is_completion_tool) {
+            let dispatch_result = if finishing_task && !task_return_available {
+                Ok(recoverable_tool_error(call, "agent.task_return_denied", "finish_task requires a return-mode child and task.return permission", started.elapsed().as_millis()))
+            } else if finishing_commit && !finish_available {
+                Ok(recoverable_tool_error(call, "agent.finish_unavailable", "commit with finish=true requires an invocation allowed to finish and an available workspace.finish tool", started.elapsed().as_millis()))
+            } else if !is_last_call && (finishing_commit || finishing_task || builtin_name.is_some_and(is_completion_tool)) {
                 Ok(recoverable_tool_error(
                     call,
                     "agent.tool_after_finish",
@@ -177,21 +245,32 @@ impl AgentRuntimeService {
             } else if builtin_name == Some(AGENT_LIST) {
                 self.dispatch_agent_list_tool(call, args, profile).await
             } else if builtin_name == Some(AGENT_DELEGATE) {
-                Box::pin(self.dispatch_agent_delegate_tool(
-                    run_id,
-                    invocation_id,
-                    call,
-                    args,
-                    profile,
-                    cancel,
-                ))
-                .await
+                let wait = args.get("wait").and_then(Value::as_bool) == Some(true);
+                if wait && !prepared.tool_turn.tools().iter().any(|id| id.is_builtin() && id.native_name() == AGENT_AWAIT) {
+                    Ok(recoverable_tool_error(call, "agent.await_unavailable", "wait=true requires agent.await permission", started.elapsed().as_millis()))
+                } else {
+                    let delegated = Box::pin(self.dispatch_agent_delegate_tool(prepared, call, args, session, gate)).await?;
+                    if wait && !delegated.result.is_error {
+                        gate.reserve_capabilities(&prepared.tool_snapshot, &prepared.tool_turn, &[ToolId::builtin(AGENT_AWAIT)?])
+                            .map_err(|error| ApplicationError::ValidationError(error.to_string()))?;
+                        let task_id = delegated.result.structured.get("taskId").and_then(Value::as_str).ok_or_else(|| ApplicationError::InternalError("delegation result has no taskId".into()))?;
+                        let await_args = json!({"taskIds":[task_id],"mode":"allCompleted","readArtifacts":args.get("readArtifacts").and_then(Value::as_bool).unwrap_or(false)});
+                        let mut outcome = self.dispatch_agent_await_tool(prepared, call, await_args.as_object().expect("object arguments"), commit_ledger.explicit_count(), session, gate, cancel).await?;
+                        outcome.result.structured["taskId"] = json!(task_id);
+                        if outcome.result.is_error {
+                            outcome.result.content = format!("Delegated task `{task_id}` already exists; do not delegate it again. {}", outcome.result.content);
+                        }
+                        Ok(outcome)
+                    } else { Ok(delegated) }
+                }
             } else if builtin_name == Some(AGENT_AWAIT) {
                 self.dispatch_agent_await_tool(
                     prepared,
                     call,
                     args,
                     commit_ledger.explicit_count(),
+                    session,
+                    gate,
                     cancel,
                 )
                 .await
@@ -246,7 +325,7 @@ impl AgentRuntimeService {
                         });
                     }
                 }
-            } else if exit_policy == AgentInvocationExitPolicy::TaskReturnRequired {
+            } else {
                 let workspace_repository =
                     InvocationWorkspaceRepository::new(self.workspace_repository.as_ref(), profile);
                 self.tool_dispatcher
@@ -259,15 +338,43 @@ impl AgentRuntimeService {
                         &workspace_repository,
                     )
                     .await
-            } else {
-                self.tool_dispatcher
-                    .dispatch(run_id, call, args, session, profile)
-                    .await
             };
 
             match dispatch_result {
-                Ok(outcome) => {
+                Ok(mut outcome) => {
                     ensure_tool_result_identity(tool_invocation, &outcome.result)?;
+                    if finishing_task && !outcome.result.is_error {
+                        gate.reserve_capabilities(&prepared.tool_snapshot, &prepared.tool_turn, &[ToolId::builtin(TASK_RETURN)?])
+                            .map_err(|error| ApplicationError::ValidationError(error.to_string()))?;
+                        outcome = self.return_written_artifact(prepared, call, outcome).await?;
+                    }
+                    let mutation_receipt = if !outcome.result.is_error && body_sha.is_some() { Some(outcome.result.structured.clone()) } else { None };
+                    if let Some(sha) = body_sha.as_deref() && !outcome.result.is_error {
+                        outcome = self.finalize_successful_mutation(prepared, outcome, sha).await?;
+                    }
+                    if let AgentToolEffect::ChatCommitRequested { path, mode, reason, finish } = outcome.effect.clone() {
+                        if finalizing_state {
+                            gate.reserve_capabilities(&prepared.tool_snapshot, &prepared.tool_turn, &[ToolId::builtin("workspace.commit")?])
+                                .map_err(|error| ApplicationError::ValidationError(error.to_string()))?;
+                        }
+                        outcome = self.perform_explicit_host_chat_commit(
+                            run_id, call, path, body_sha.as_deref(), mode, reason, outcome.elapsed_ms, round,
+                            invocation_id, commit_ledger, cancel,
+                        ).await?;
+                        if let Some(receipt) = mutation_receipt {
+                            outcome.result.structured["savedMutation"] = receipt;
+                            if outcome.result.is_error {
+                                outcome.result.content = format!("State operation succeeded but publication did not. Do not repeat the state operation; fix publication and retry commit. {}", outcome.result.content);
+                            }
+                        }
+                        if finish && !outcome.result.is_error {
+                            gate.reserve_capabilities(&prepared.tool_snapshot, &prepared.tool_turn, &[ToolId::builtin(WORKSPACE_FINISH)?])
+                                .map_err(|error| ApplicationError::ValidationError(error.to_string()))?;
+                            outcome.effect = AgentToolEffect::Finish;
+                            outcome.result.content = "Chat commit confirmed. Finalizing the run and publishing pending workspace changes without another model request.".to_string();
+                            outcome.result.structured["finishing"] = json!(true);
+                        }
+                    }
                     let outcome = match outcome.effect.clone() {
                         AgentToolEffect::Finish => {
                             if exit_policy == AgentInvocationExitPolicy::TaskReturnRequired {
@@ -297,21 +404,6 @@ impl AgentRuntimeService {
                                 }
                                 outcome
                             }
-                        }
-                        AgentToolEffect::ChatCommitRequested { path, mode, reason } => {
-                            self.perform_explicit_host_chat_commit(
-                                run_id,
-                                call,
-                                path,
-                                mode,
-                                reason,
-                                outcome.elapsed_ms,
-                                round,
-                                invocation_id,
-                                commit_ledger,
-                                cancel,
-                            )
-                            .await?
                         }
                         _ => outcome,
                     };

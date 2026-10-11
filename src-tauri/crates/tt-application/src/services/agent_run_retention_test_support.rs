@@ -372,6 +372,9 @@ impl AgentRunRepository for TestAgentRunRepository {
         if let Some(invocation_id) = query.invocation_id.as_deref() {
             events.retain(|event| event_belongs_to_invocation(event, invocation_id));
         }
+        if let Some(types) = query.event_types.as_ref() {
+            events.retain(|event| types.contains(&event.event_type));
+        }
 
         if let Some(before_seq) = query.before_seq {
             events.retain(|event| event.seq < before_seq);

@@ -48,9 +48,12 @@ impl AgentRuntimeService {
             .workspace_repository
             .read_text(&dto.run_id, &path)
             .await?;
-        let document: StoredModelResponse = serde_json::from_str(&file.text).map_err(|error| {
-            ApplicationError::ValidationError(format!("agent.model_response_parse_failed: {error}"))
-        })?;
+        let document: StoredModelResponse =
+            tt_domain::json_input::from_str(&file.text).map_err(|error| {
+                ApplicationError::ValidationError(format!(
+                    "agent.model_response_parse_failed: {error}"
+                ))
+            })?;
         if document.round != dto.round {
             return Err(ApplicationError::ValidationError(format!(
                 "agent.model_response_round_mismatch: requested round {}, stored round {}",

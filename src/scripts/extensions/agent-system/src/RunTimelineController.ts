@@ -20,6 +20,7 @@ import {
 import { projectSubAgentTasks } from './run-invocation-projector';
 import { createTimelineDetailState } from './run-timeline-detail-state';
 import {
+    hasUnpublishedReply,
     runTimelineHeading,
     shortRunId,
     subAgentTrayTitle,
@@ -151,6 +152,7 @@ export function createRunTimelineController(options: RunTimelineOptions): RunTim
         const terminalType = main.terminalEvent?.type ?? '';
         const isRunning = Boolean(activeRun?.runId && currentRun?.runId === activeRun.runId);
         const heading = runTimelineHeading(terminalType, isRunning, Boolean(currentRun?.runId), deps.tr);
+        const outputPendingState = hasUnpublishedReply(main.events, main.timelineProjection.replyPublication);
         const subTask = view.subAgentTasks.find(task => task.targetInvocationId === subAgent.invocationId()) ?? null;
         return {
             mode: options.mode,
@@ -180,8 +182,9 @@ export function createRunTimelineController(options: RunTimelineOptions): RunTim
             terminalType,
             panelStatus: heading.status,
             panelView: collapsed ? 'collapsed' : detailsOpen ? 'details' : 'events',
-            headerTitle: heading.title,
-            headerSubtitle: latest ? timelineItemTitle(latest, deps.tr)
+            headerTitle: !terminalType && isRunning && outputPendingState ? deps.tr('timelineOutputReady') : heading.title,
+            headerSubtitle: terminalType && outputPendingState ? deps.tr('timelineOutputStateUnsaved')
+                : latest ? timelineItemTitle(latest, deps.tr)
                 : currentRun?.runId ? shortRunId(currentRun.runId) : deps.tr('timelineIdle'),
             detailTitle: selectedItem ? timelineItemTitle(selectedItem, deps.tr) : deps.tr('timelineDetails'),
             selectedHasDetails: targets.length > 0,

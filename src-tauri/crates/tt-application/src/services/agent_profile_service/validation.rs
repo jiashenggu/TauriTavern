@@ -144,6 +144,36 @@ pub(super) fn normalize_context_policy(
     if policy.initial_chat_history_messages < 0 {
         policy.initial_chat_history_messages = -1;
     }
+    for files in [
+        &mut policy.initial_workspace_files,
+        &mut policy.initial_baseline_files,
+    ] {
+        if files.len() > 8 {
+            return Err(ApplicationError::ValidationError(
+                "agent.context_files_invalid: at most8 files per initial file list are allowed"
+                    .into(),
+            ));
+        }
+        let mut paths = std::collections::HashSet::new();
+        for raw in files {
+            let path = tt_domain::models::agent::WorkspacePath::parse(raw.as_str())?;
+            if !paths.insert(path.as_str().to_owned()) {
+                return Err(ApplicationError::ValidationError(
+                    "agent.context_files_invalid: duplicate initial file".into(),
+                ));
+            }
+            *raw = path.as_str().to_owned();
+        }
+    }
+    if policy
+        .initial_baseline_files
+        .iter()
+        .any(|path| !path.starts_with("persist/"))
+    {
+        return Err(ApplicationError::ValidationError(
+            "agent.context_baseline_invalid: baseline files must be under persist/".into(),
+        ));
+    }
     Ok(())
 }
 

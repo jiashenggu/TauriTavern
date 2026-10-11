@@ -225,6 +225,8 @@
     "agent_system.timelineCharCount": "{count} 字符",
     "agent_system.timelineCancelled": "Agent 已取消",
     "agent_system.timelineCompleted": "Agent 已完成",
+    "agent_system.timelineOutputReady": "正文已显示 · 状态仍在保存",
+    "agent_system.timelineOutputStateUnsaved": "正文已保留，状态尚未保存；请先恢复本次运行再继续。",
     "agent_system.timelineContent": "内容",
     "agent_system.timelineDetailEmpty": "此事件没有详情。",
     "agent_system.timelineDetailFieldErrorCode": "错误",

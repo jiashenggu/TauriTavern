@@ -171,6 +171,7 @@ type TauriTavernAgentTaskDetail = {
 };
 
 type TauriTavernAgentRunTimelineProjection = {
+    replyPublication: { seq: number; pending: boolean };
     foregroundInvocationIds: string[];
     invocations: TauriTavernAgentRunTimelineInvocation[];
     delegationEdges: TauriTavernAgentRunTimelineDelegationEdge[];
@@ -458,6 +459,8 @@ type TauriTavernAgentProfileDefinition = {
         // positive means a recent-message window.
         initialChatHistoryMessages: number;
         includeActivatedWorldInfo: boolean;
+        initialWorkspaceFiles?: string[];
+        initialBaselineFiles?: string[];
     };
     delegation: {
         canDelegate: boolean;

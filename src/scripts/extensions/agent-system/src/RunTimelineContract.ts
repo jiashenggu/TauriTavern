@@ -31,6 +31,7 @@ export type TimelineDelegationEdge = Omit<
 };
 
 export type TimelineProjection = {
+    replyPublication: TauriTavernAgentRunTimelineProjection['replyPublication'];
     foregroundInvocationIds: string[];
     invocations: TimelineProjectionInvocation[];
     delegationEdges: TimelineDelegationEdge[];

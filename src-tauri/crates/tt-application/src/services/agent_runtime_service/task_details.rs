@@ -73,8 +73,8 @@ impl AgentRuntimeService {
         };
         let path = WorkspacePath::parse(result_ref)?;
         let file = self.workspace_repository.read_text(run_id, &path).await?;
-        let mut result: StoredTaskResult =
-            serde_json::from_str(&file.text).map_err(|error| invalid_result(&error.to_string()))?;
+        let mut result: StoredTaskResult = tt_domain::json_input::from_str(&file.text)
+            .map_err(|error| invalid_result(&error.to_string()))?;
         if result.schema_version != 1 || result.kind != "tauritavern.agentTaskResult" {
             return Err(invalid_result("unsupported result format"));
         }

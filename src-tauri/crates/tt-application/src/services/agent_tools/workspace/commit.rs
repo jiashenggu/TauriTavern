@@ -2,7 +2,8 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::args::{
-    ensure_visible_workspace_path, parse_workspace_path, required_trimmed_string_arg, tool_error,
+    ensure_visible_workspace_path, optional_bool_arg, parse_workspace_path,
+    required_trimmed_string_arg, tool_error,
 };
 use super::policy::workspace_access_policy;
 use crate::errors::ApplicationError;
@@ -29,6 +30,15 @@ pub(in crate::services::agent_tools) async fn commit(
     args: &Map<String, Value>,
     profile: &ResolvedAgentProfile,
 ) -> Result<(AgentToolResult, AgentToolEffect), ApplicationError> {
+    let finish = match optional_bool_arg(args, "finish") {
+        Ok(value) => value.unwrap_or(false),
+        Err(message) => {
+            return Ok((
+                tool_error(call, "tool.invalid_arguments", &message),
+                AgentToolEffect::None,
+            ));
+        }
+    };
     let policy = workspace_access_policy(workspace_repository, run_id).await?;
     let path = required_trimmed_string_arg(args, "path")
         .unwrap_or(profile.output.message_body_path.as_str());
@@ -74,6 +84,11 @@ pub(in crate::services::agent_tools) async fn commit(
             error_code: None,
             resource_refs: vec![path.as_str().to_string()],
         },
-        AgentToolEffect::ChatCommitRequested { path, mode, reason },
+        AgentToolEffect::ChatCommitRequested {
+            path,
+            mode,
+            reason,
+            finish,
+        },
     ))
 }

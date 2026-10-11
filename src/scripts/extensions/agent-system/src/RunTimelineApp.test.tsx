@@ -61,7 +61,7 @@ test('active hide/show and timeline/detail switches preserve the mounted event s
     const deps: ActiveTimelineOptions['deps'] = {
         readEvents: () => Promise.resolve({
             events: [fileEvent(1)],
-            timelineProjection: { foregroundInvocationIds: [], invocations: [], delegationEdges: [] },
+            timelineProjection: { foregroundInvocationIds: [], invocations: [], delegationEdges: [], replyPublication: { seq: 0, pending: false } },
         }),
         reportError: error => { throw error; },
         tr,
@@ -117,7 +117,7 @@ test('the React event list renders only the virtual window while the controller 
         deps: {
             readEvents: () => Promise.resolve({
                 events: Array.from({ length: 240 }, (_, index) => fileEvent(index + 1)),
-                timelineProjection: { foregroundInvocationIds: [], invocations: [], delegationEdges: [] },
+                timelineProjection: { foregroundInvocationIds: [], invocations: [], delegationEdges: [], replyPublication: { seq: 0, pending: false } },
             }),
             reportError: error => { throw error; },
             tr,
@@ -154,7 +154,7 @@ test('detail navigation scrolls through older pages with bounded buttons and laz
                 const last = beforeSeq === Number.MAX_SAFE_INTEGER ? 720 : (beforeSeq ?? 1) - 1;
                 return Promise.resolve({
                     events: Array.from({ length: 240 }, (_, index) => fileEvent(last - 239 + index)),
-                    timelineProjection: { foregroundInvocationIds: [], invocations: [], delegationEdges: [] },
+                    timelineProjection: { foregroundInvocationIds: [], invocations: [], delegationEdges: [], replyPublication: { seq: 0, pending: false } },
                 });
             },
             reportError: error => { throw error; },
@@ -217,7 +217,7 @@ async function renderTaskTimeline(
     event: TauriTavernAgentRunEvent,
     task: TauriTavernAgentTaskDetail = taskDetail,
     projection: TauriTavernAgentRunTimelineProjection = {
-        foregroundInvocationIds: ['inv_root'], invocations: [], delegationEdges: [],
+        replyPublication: { seq: 0, pending: false }, foregroundInvocationIds: ['inv_root'], invocations: [], delegationEdges: [],
     },
 ) {
     const reads: Parameters<TauriTavernAgentApi['readTaskDetail']>[0][] = [];
@@ -294,7 +294,7 @@ test('projected handoff details read the brief even when the original request is
     const { controller, reads } = await renderTaskTimeline({
         ...fileEvent(300), type: 'run_completed', payload: { invocationId: 'inv-child' },
     }, task, {
-        foregroundInvocationIds: ['inv_root', 'inv-child'], invocations: [],
+        replyPublication: { seq: 0, pending: false }, foregroundInvocationIds: ['inv_root', 'inv-child'], invocations: [],
         delegationEdges: [{
             taskId: task.taskId, sourceInvocationId: task.parentInvocationId,
             targetInvocationId: task.childInvocationId, targetProfileId: task.targetProfileId,
@@ -317,7 +317,7 @@ test('active timeline renders a streaming write card with tail and metric', asyn
     const deps: ActiveTimelineOptions['deps'] = {
         readEvents: () => Promise.resolve({
             events: [fileEvent(1)],
-            timelineProjection: { foregroundInvocationIds: [], invocations: [], delegationEdges: [] },
+            timelineProjection: { foregroundInvocationIds: [], invocations: [], delegationEdges: [], replyPublication: { seq: 0, pending: false } },
         }),
         reportError: error => { throw error; },
         tr,
@@ -432,7 +432,7 @@ test('SubAgent tray opens and closes its native dialog through controller-local 
                 return Promise.resolve(input.invocationId ? { events: [] } : {
                     events: [],
                     timelineProjection: {
-                        foregroundInvocationIds: ['inv_root'],
+                        replyPublication: { seq: 0, pending: false }, foregroundInvocationIds: ['inv_root'],
                         invocations: [{
                             invocationId: 'inv-child',
                             parentInvocationId: 'inv_root',

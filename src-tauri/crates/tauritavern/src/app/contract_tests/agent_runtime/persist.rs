@@ -1,8 +1,79 @@
 use super::*;
 
 #[tokio::test]
+async fn reply_publication_projection_is_independent_of_event_pages_and_invocation_filters() {
+    use tt_application::dto::agent_dto::AgentReadEventsDto;
+    let root = temp_root("reply-publication-projection");
+    let fixture = agent_runtime_fixture(&root);
+    let profile = resolve_contract_profile(&fixture).await;
+    let run = contract_run(
+        "reply-publication",
+        AgentRunPresentation::Foreground,
+        &profile,
+    );
+    fixture.agent_repository.create_run(&run).await.unwrap();
+    let read = || {
+        fixture.service.read_events(AgentReadEventsDto {
+            run_id: run.id.clone(),
+            after_seq: None,
+            before_seq: Some(u64::MAX),
+            limit: 1,
+            invocation_id: Some("unrelated-invocation".into()),
+            include_timeline_projection: true,
+        })
+    };
+    let empty = read()
+        .await
+        .unwrap()
+        .timeline_projection
+        .unwrap()
+        .reply_publication;
+    assert_eq!(empty.seq, 0);
+    assert!(!empty.pending);
+    for (event_type, pending) in [
+        ("chat_commit_completed", true),
+        ("persistent_state_metadata_updated", false),
+        ("chat_commit_completed", true),
+    ] {
+        let publication = fixture
+            .agent_repository
+            .append_event(
+                &run.id,
+                AgentRunEventLevel::Info,
+                event_type,
+                json!({"invocationId":"inv_root"}),
+            )
+            .await
+            .unwrap();
+        for _ in 0..250 {
+            fixture
+                .agent_repository
+                .append_event(
+                    &run.id,
+                    AgentRunEventLevel::Info,
+                    "tool_call_completed",
+                    json!({"invocationId":"inv_root"}),
+                )
+                .await
+                .unwrap();
+        }
+        let result = read().await.unwrap();
+        assert!(result.events.is_empty());
+        let status = result.timeline_projection.unwrap().reply_publication;
+        assert_eq!(status.seq, publication.seq);
+        assert_eq!(status.pending, pending);
+    }
+    fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
 async fn missing_persist_requires_an_explicit_empty_start_before_creating_a_run() {
     for (label, metadata, expected_error) in [
+        (
+            "pending-state",
+            json!({ "persistStateStatus": "not_committed", "persistStateId": "old_state" }),
+            "agent.persist_state_pending",
+        ),
         (
             "missing-id",
             json!({ "persistStateStatus": "committed" }),
@@ -24,6 +95,12 @@ async fn missing_persist_requires_an_explicit_empty_start_before_creating_a_run(
         let profile = resolve_contract_profile(&fixture).await;
         let mut chat = Chat::new("User", "Alice");
         chat.file_name = Some("story.jsonl".to_string());
+        if label == "pending-state" {
+            chat.messages.push(serde_json::from_value(json!({
+                "name": "Alice", "mes": "Earlier completed reply.",
+                "extra": { "tauritavern": { "agent": { "persistStateStatus": "committed", "persistStateId": "older_state" } } }
+            })).unwrap());
+        }
         chat.messages.push(
             serde_json::from_value(json!({
                 "name": "Alice", "mes": "Keep this chat message.",
@@ -75,7 +152,7 @@ async fn missing_persist_requires_an_explicit_empty_start_before_creating_a_run(
                 .unwrap();
             assert_eq!(run.status, AgentRunStatus::Completed);
             assert_eq!(run.persist_base_state_id, None);
-            assert_eq!(run.input_message_count, Some(1));
+            assert_eq!(run.input_message_count, Some(chat.messages.len()));
             let files = fixture
                 .agent_repository
                 .list_files(

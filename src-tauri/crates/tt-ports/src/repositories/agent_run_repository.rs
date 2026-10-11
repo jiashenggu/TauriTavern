@@ -10,6 +10,7 @@ use tt_domain::models::agent::{
 
 #[derive(Debug, Clone)]
 pub struct AgentRunEventReadQuery {
+    pub event_types: Option<Vec<String>>,
     pub after_seq: Option<u64>,
     pub before_seq: Option<u64>,
     pub limit: usize,

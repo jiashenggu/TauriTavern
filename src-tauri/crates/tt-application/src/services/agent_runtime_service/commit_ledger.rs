@@ -7,6 +7,8 @@ use tt_domain::models::agent::{AgentChatCommitMode, WorkspacePath};
 #[serde(rename_all = "camelCase")]
 struct CommittedChatMessage {
     path: String,
+    #[serde(default)]
+    sha256: Option<String>,
     mode: AgentChatCommitMode,
     message_id: Option<String>,
     round: usize,
@@ -23,6 +25,7 @@ impl RunCommitLedger {
     pub(super) fn record(
         &mut self,
         path: &WorkspacePath,
+        sha256: &str,
         mode: AgentChatCommitMode,
         message_id: Option<String>,
         round: usize,
@@ -31,6 +34,7 @@ impl RunCommitLedger {
         self.explicit_count += usize::from(is_explicit);
         self.commits.push(CommittedChatMessage {
             path: path.as_str().to_string(),
+            sha256: Some(sha256.to_owned()),
             mode,
             message_id,
             round,
@@ -51,6 +55,14 @@ impl RunCommitLedger {
 
     pub(super) fn has_explicit_commit(&self) -> bool {
         self.explicit_count() > 0
+    }
+
+    pub(super) fn matches_delivered_body(&self, path: &str, sha256: &str) -> bool {
+        self.commits.last().is_some_and(|message| {
+            message.path == path
+                && message.mode == AgentChatCommitMode::Replace
+                && message.sha256.as_deref() == Some(sha256)
+        })
     }
 
     pub(super) fn latest_message_id(&self) -> Option<&str> {

@@ -70,7 +70,7 @@ pub(super) fn normalize_tool_result_payload(content: &str) -> Value {
         return json!({ "content": "" });
     }
 
-    match serde_json::from_str::<Value>(trimmed) {
+    match tt_domain::json_input::from_str::<Value>(trimmed) {
         Ok(Value::Object(object)) => Value::Object(object),
         Ok(other) => json!({ "content": other }),
         Err(_) => json!({ "content": content }),

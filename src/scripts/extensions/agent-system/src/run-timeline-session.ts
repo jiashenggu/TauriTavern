@@ -132,7 +132,7 @@ async function refreshProjection(session: RunTimelineSession, readEvents: Timeli
     const requestId = session.requestId;
     const result = await readPage(session, readEvents, { afterSeq: RUN_EVENT_TAIL_SEQ, limit: 1 });
     if (!isCurrent(session, requestId)) return false;
-    session.timelineProjection = normalizeTimelineProjection(result.timelineProjection);
+    session.timelineProjection = normalizeTimelineProjection(result.timelineProjection, session.timelineProjection);
     return true;
 }
 
@@ -154,7 +154,7 @@ async function readPage(
 
 function applyResult(session: RunTimelineSession, result: TimelineReadResult): void {
     if (session.includeTimelineProjection) {
-        session.timelineProjection = normalizeTimelineProjection(result.timelineProjection);
+        session.timelineProjection = normalizeTimelineProjection(result.timelineProjection, session.timelineProjection);
     }
     if (!Array.isArray(result.events)) {
         throw new Error('agent.timeline_events_invalid: readEvents.events must be an array');

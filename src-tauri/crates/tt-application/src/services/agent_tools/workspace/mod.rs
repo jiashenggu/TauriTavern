@@ -3,6 +3,8 @@ mod args;
 mod commit;
 mod descriptors;
 mod finish;
+mod json_validation;
+mod json_patch;
 mod list_files;
 mod policy;
 mod read_file;

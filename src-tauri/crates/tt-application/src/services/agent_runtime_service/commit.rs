@@ -136,6 +136,7 @@ impl AgentRuntimeService {
         run_id: &str,
         call: &ToolInvocation,
         path: WorkspacePath,
+        expected_sha256: Option<&str>,
         mode: AgentChatCommitMode,
         reason: Option<String>,
         elapsed_ms: u128,
@@ -157,6 +158,14 @@ impl AgentRuntimeService {
                 Err(error) => return Err(error.into()),
             },
         };
+        if expected_sha256.is_some_and(|expected| expected != file.sha256) {
+            return Ok(recoverable_tool_error(
+                call,
+                "agent.finalize_body_changed",
+                "The reviewed body changed before publication; review and explicitly commit it before finishing.",
+                elapsed_ms,
+            ));
+        }
         if self.required_artifact_is_empty(run_id, &file).await? {
             return Ok(recoverable_tool_error(
                 call,
@@ -363,6 +372,7 @@ impl AgentRuntimeService {
                 let message_index = message_index_from_message_id(result.message_id.as_deref());
                 commit_ledger.record(
                     &file.path,
+                    &file.sha256,
                     mode,
                     result.message_id.clone(),
                     round,
@@ -641,7 +651,7 @@ fn persistent_change_payloads(changes: &WorkspacePersistentChangeSet) -> Vec<Val
         .collect()
 }
 
-fn is_auto_commit_text_path(path: &WorkspacePath) -> bool {
+pub(super) fn is_auto_commit_text_path(path: &WorkspacePath) -> bool {
     Path::new(path.as_str())
         .extension()
         .and_then(|extension| extension.to_str())

@@ -160,7 +160,9 @@ fn persist_state_id_from_message(
         .unwrap_or_default()
         .trim();
     if status == "not_committed" {
-        return Ok(None);
+        return Err(ApplicationError::ValidationError(format!(
+            "agent.persist_state_pending: Agent reply at chat message {index} is visible but its persistent state has not been published; resume or resolve that run before continuing"
+        )));
     }
     if !status.is_empty() && status != "committed" {
         return Err(ApplicationError::ValidationError(format!(

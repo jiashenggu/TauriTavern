@@ -6,7 +6,7 @@ use super::rendering::render_task_return_summary;
 use super::task_status::{task_is_terminal, task_return_status, task_status_label};
 use super::tool_error::tool_error_outcome;
 use crate::errors::ApplicationError;
-use crate::services::agent_runtime_service::AgentRuntimeService;
+use crate::services::agent_runtime_service::{AgentRuntimeService, PreparedInvocation};
 use crate::services::agent_tools::{AgentToolDispatchOutcome, AgentToolEffect};
 use crate::services::agent_workspace_scope::{
     format_model_workspace_roots, task_result_summary_path, workspace_path_is_under_any_root,
@@ -18,6 +18,37 @@ use tt_domain::models::agent::{
 use tt_domain::models::tool::ToolInvocation;
 
 impl AgentRuntimeService {
+    pub(in crate::services::agent_runtime_service) async fn return_written_artifact(
+        &self,
+        prepared: &PreparedInvocation,
+        call: &ToolInvocation,
+        written: AgentToolDispatchOutcome,
+    ) -> Result<AgentToolDispatchOutcome, ApplicationError> {
+        let AgentToolEffect::WorkspaceFileWritten { file, mode } = &written.effect else {
+            return Ok(written);
+        };
+        self.event(
+            &prepared.invocation.run_id,
+            AgentRunEventLevel::Info,
+            "workspace_file_written",
+            json!({
+                "invocationId":prepared.invocation.id,"path":file.path.as_str(),"mode":mode,
+                "chars":file.text.chars().count(),"sha256":file.sha256,
+            }),
+        )
+        .await?;
+        let args = json!({"status":"completed","summary":"Requested artifact saved successfully.","artifacts":[{"path":file.path.as_str(),"sha256":file.sha256}]});
+        self.dispatch_task_return_tool(
+            &prepared.invocation.run_id,
+            &prepared.invocation.id,
+            call,
+            args.as_object().expect("object arguments"),
+            prepared.invocation.exit_policy,
+            &prepared.profile,
+        )
+        .await
+    }
+
     pub(in crate::services::agent_runtime_service) async fn dispatch_task_return_tool(
         &self,
         run_id: &str,
@@ -208,9 +239,9 @@ fn required_trimmed_string(args: &Map<String, Value>, key: &str) -> Result<Strin
         .ok_or_else(|| format!("{key} must be a non-empty string"))
 }
 
-struct TaskReturnArgumentError {
-    code: &'static str,
-    message: String,
+pub(super) struct TaskReturnArgumentError {
+    pub(super) code: &'static str,
+    pub(super) message: String,
 }
 
 impl TaskReturnArgumentError {
@@ -220,6 +251,42 @@ impl TaskReturnArgumentError {
             message: message.into(),
         }
     }
+}
+
+pub(super) fn artifact_reference(
+    artifact: &Value,
+) -> Result<(WorkspacePath, Option<String>), TaskReturnArgumentError> {
+    let object = artifact.as_object().ok_or_else(|| {
+        TaskReturnArgumentError::new("tool.invalid_arguments", "artifact must be an object")
+    })?;
+    let path = object.get("path").and_then(Value::as_str).ok_or_else(|| {
+        TaskReturnArgumentError::new(
+            "tool.invalid_arguments",
+            "artifact path must be a workspace path string",
+        )
+    })?;
+    let path = WorkspacePath::parse(path).map_err(|error| {
+        TaskReturnArgumentError::new(
+            "workspace.invalid_path",
+            format!("invalid artifact path: {error}"),
+        )
+    })?;
+    let sha256 = object
+        .get("sha256")
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|sha| sha.len() == 64 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .map(str::to_ascii_lowercase)
+                .ok_or_else(|| {
+                    TaskReturnArgumentError::new(
+                        "tool.invalid_arguments",
+                        "artifact sha256 must be a 64-digit hexadecimal string when provided",
+                    )
+                })
+        })
+        .transpose()?;
+    Ok((path, sha256))
 }
 
 fn normalize_task_return_arguments(
@@ -239,25 +306,19 @@ fn normalize_task_return_arguments(
 
     let mut normalized_artifacts = Vec::with_capacity(artifacts.len());
     for (index, artifact) in artifacts.iter().enumerate() {
-        let Some(artifact_object) = artifact.as_object() else {
-            return Err(TaskReturnArgumentError::new(
-                "tool.invalid_arguments",
-                format!("artifacts[{index}] must be an object"),
-            ));
-        };
-        let mut artifact_object = artifact_object.clone();
-        let Some(path) = artifact_object.get("path").and_then(Value::as_str) else {
-            return Err(TaskReturnArgumentError::new(
-                "tool.invalid_arguments",
-                format!("artifacts[{index}].path must be a workspace path string"),
-            ));
-        };
-        let path = WorkspacePath::parse(path).map_err(|error| {
+        let (path, sha256) = artifact_reference(artifact).map_err(|error| {
             TaskReturnArgumentError::new(
-                "workspace.invalid_path",
-                format!("artifacts[{index}].path is not a valid workspace path: {error}"),
+                error.code,
+                format!("artifacts[{index}]: {}", error.message),
             )
         })?;
+        let mut artifact_object = artifact
+            .as_object()
+            .expect("validated artifact object")
+            .clone();
+        if let Some(sha256) = sha256 {
+            artifact_object.insert("sha256".into(), Value::String(sha256));
+        }
         if !workspace_path_is_under_any_root(&path, &profile.workspace.visible_roots) {
             return Err(TaskReturnArgumentError::new(
                 "workspace.path_not_visible",

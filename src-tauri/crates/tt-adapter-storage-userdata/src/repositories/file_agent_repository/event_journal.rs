@@ -58,7 +58,12 @@ impl FileAgentRepository {
 
             let event = parse_event(&line, &events_path)?;
             ensure_event_seq(&event, line_seq, &events_path)?;
-            if invocation_id.is_some_and(|id| !event_belongs_to_invocation(&event, id)) {
+            if invocation_id.is_some_and(|id| !event_belongs_to_invocation(&event, id))
+                || query
+                    .event_types
+                    .as_ref()
+                    .is_some_and(|types| !types.contains(&event.event_type))
+            {
                 continue;
             }
 

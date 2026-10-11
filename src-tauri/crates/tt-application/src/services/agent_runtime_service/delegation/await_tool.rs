@@ -11,7 +11,8 @@ use crate::errors::ApplicationError;
 use crate::services::agent_runtime_service::{
     AgentCancelReceiver, AgentRuntimeService, PreparedInvocation,
 };
-use crate::services::agent_tools::{AgentToolDispatchOutcome, AgentToolEffect};
+use crate::services::agent_tools::{AgentToolDispatchOutcome, AgentToolEffect, AgentToolSession};
+use crate::services::tool_request_gate::ToolRequestGate;
 use tt_domain::models::agent::{
     AgentRunEventLevel, AgentTaskRecord, AgentTaskStatus, AgentToolResult,
 };
@@ -29,6 +30,8 @@ struct AgentAwaitArgs {
     mode: Option<AgentAwaitMode>,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    #[serde(default)]
+    read_artifacts: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -64,12 +67,18 @@ pub(in crate::services::agent_runtime_service) struct AwaitTaskView {
 }
 
 impl AgentRuntimeService {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "await shares the invocation read session and budget for artifact delivery"
+    )]
     pub(in crate::services::agent_runtime_service) async fn dispatch_agent_await_tool(
         &self,
         prepared: &PreparedInvocation,
         call: &ToolInvocation,
         args: &Map<String, Value>,
         committed_count: usize,
+        session: &mut AgentToolSession,
+        gate: &mut ToolRequestGate,
         cancel: &mut AgentCancelReceiver,
     ) -> Result<AgentToolDispatchOutcome, ApplicationError> {
         let run_id = prepared.invocation.run_id.as_str();
@@ -180,7 +189,7 @@ impl AgentRuntimeService {
         };
 
         let views = self.await_task_views(run_id, &tasks).await?;
-        let structured = json!({
+        let mut structured = json!({
             "mode": mode,
             "timedOut": timed_out,
             "tasks": views,
@@ -190,10 +199,42 @@ impl AgentRuntimeService {
             profile.run.presentation,
             committed_count,
         );
-        let content = render_await_content(&structured, Some(&continuation_hint));
+        let mut content = render_await_content(&structured, Some(&continuation_hint));
+        let mut artifact_error = None;
+        if args.read_artifacts {
+            let reads = async {
+                let files = artifact_files(&views)?;
+                self.read_context_files(prepared, session, gate, &files, false)
+                    .await
+            }
+            .await;
+            match reads {
+                Ok(reads) => {
+                    if !reads.is_empty() {
+                        content.push_str(&format!(
+                            "\n\n{}",
+                            super::super::workspace_context::context_text(&reads)
+                        ));
+                    }
+                    structured["artifactReads"] = json!(
+                        reads
+                            .iter()
+                            .map(|read| &read.structured)
+                            .collect::<Vec<_>>()
+                    );
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    structured["readError"] =
+                        json!({"code":"agent.artifact_read_failed","message":message});
+                    content.push_str(&format!("\n\nArtifact reading failed: {message}. Task results above are retained; query or read these existing tasks rather than delegating them again."));
+                    artifact_error = Some("agent.artifact_read_failed".to_string());
+                }
+            }
+        }
         self.event(
             run_id,
-            if timed_out {
+            if timed_out || artifact_error.is_some() {
                 AgentRunEventLevel::Warn
             } else {
                 AgentRunEventLevel::Info
@@ -204,6 +245,7 @@ impl AgentRuntimeService {
                 "mode": mode,
                 "timedOut": timed_out,
                 "taskCount": structured["tasks"].as_array().map(Vec::len).unwrap_or(0),
+                "artifactReadFailed": artifact_error.is_some(),
             }),
         )
         .await?;
@@ -214,8 +256,8 @@ impl AgentRuntimeService {
                 tool_id: call.tool_id.clone(),
                 content,
                 structured,
-                is_error: false,
-                error_code: None,
+                is_error: artifact_error.is_some(),
+                error_code: artifact_error,
                 resource_refs: Vec::new(),
             },
             effect: AgentToolEffect::None,
@@ -327,6 +369,37 @@ impl AgentRuntimeService {
             render_await_content(&structured, Some(&continuation_hint))
         )))
     }
+}
+
+fn artifact_files(
+    views: &[AwaitTaskView],
+) -> Result<Vec<(String, Option<String>)>, ApplicationError> {
+    let mut files = Vec::new();
+    for view in views
+        .iter()
+        .filter(|view| view.status == AgentTaskStatus::Completed)
+    {
+        let Some(artifacts) = &view.artifacts else {
+            continue;
+        };
+        let artifacts = artifacts.as_array().ok_or_else(|| {
+            ApplicationError::ValidationError(format!(
+                "agent.artifact_invalid: task {} artifacts must be an array",
+                view.task_id
+            ))
+        })?;
+        for artifact in artifacts {
+            let (path, sha) =
+                super::task_return_tool::artifact_reference(artifact).map_err(|error| {
+                    ApplicationError::ValidationError(format!(
+                        "agent.artifact_invalid: task {}: {}",
+                        view.task_id, error.message
+                    ))
+                })?;
+            files.push((path.as_str().to_owned(), sha));
+        }
+    }
+    Ok(files)
 }
 
 fn normalize_task_ids(task_ids: Option<Vec<String>>) -> Result<Option<Vec<String>>, String> {

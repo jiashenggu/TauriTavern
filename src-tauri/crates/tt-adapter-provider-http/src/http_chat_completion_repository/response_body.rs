@@ -103,8 +103,11 @@ pub(super) fn parse_upstream_json_body(
     content_type: &str,
     body: &[u8],
 ) -> Result<Value, DomainError> {
-    match serde_json::from_slice::<Value>(body) {
+    match tt_domain::json_input::from_slice::<Value>(body) {
         Ok(value) => Ok(value),
+        Err(error) if error.is_data() => Err(DomainError::InvalidData(format!(
+            "model.upstream_invalid_response: {provider_name} JSON rejected ({operation}): {error}"
+        ))),
         Err(error) => {
             log_upstream_body_parse_failure(
                 provider_name,
@@ -157,6 +160,20 @@ mod tests {
             error.to_string(),
             "model.upstream_invalid_response: OpenAI returned status 200 non-JSON body (generate): expected value at line 1 column 1"
         );
+    }
+
+    #[test]
+    fn upstream_tool_arguments_reject_ambiguous_objects_before_normalization() {
+        let body = br#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"workspace_apply_patch","args":{"json_ops":[{"op":"add","path":"/value","value":{"$serde_json::private::Number":"123"}}]}}}]}}]}"#;
+        let error = parse_upstream_json_body(
+            "Gemini",
+            "generate",
+            StatusCode::OK,
+            "application/json",
+            body,
+        )
+        .unwrap_err();
+        assert!(matches!(error, DomainError::InvalidData(_)));
     }
 
     #[test]

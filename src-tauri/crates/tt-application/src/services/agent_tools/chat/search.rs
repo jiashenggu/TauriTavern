@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::{
     DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT, MAX_SEARCH_SCAN_LIMIT, chat_unavailable_message,
@@ -9,7 +9,7 @@ use super::{
 };
 use crate::errors::ApplicationError;
 use crate::services::agent_tools::common::{
-    optional_usize_arg, required_trimmed_string_arg, tool_error,
+    optional_bool_arg, optional_usize_arg, required_trimmed_string_arg, tool_error,
 };
 use crate::services::agent_tools::dispatcher::AgentToolEffect;
 use tt_domain::errors::DomainError;
@@ -54,6 +54,15 @@ pub(in crate::services::agent_tools) async fn search(
     args: &Map<String, Value>,
     macros: &Arc<FrozenMacros>,
 ) -> Result<(AgentToolResult, AgentToolEffect), ApplicationError> {
+    let read_matches = match optional_bool_arg(args, "read_matches") {
+        Ok(value) => value.unwrap_or(false),
+        Err(message) => {
+            return Ok((
+                tool_error(call, "tool.invalid_arguments", &message),
+                AgentToolEffect::None,
+            ));
+        }
+    };
     let query = match required_trimmed_string_arg(args, "query") {
         Some(query) => query.to_string(),
         None => {
@@ -126,21 +135,51 @@ pub(in crate::services::agent_tools) async fn search(
         .map(|hit| format!("chat:current#{}", hit.index))
         .collect::<Vec<_>>();
 
-    Ok((
-        AgentToolResult {
-            call_id: call.call_id.clone(),
-            tool_id: call.tool_id.clone(),
-            content,
-            structured: structured_value(ChatSearchStructured {
-                query: search_query.query.as_str(),
-                hits: hits.iter().map(structured_hit).collect(),
-            }),
-            is_error: false,
-            error_code: None,
-            resource_refs,
-        },
-        AgentToolEffect::None,
-    ))
+    let mut result = AgentToolResult {
+        call_id: call.call_id.clone(),
+        tool_id: call.tool_id.clone(),
+        content,
+        structured: structured_value(ChatSearchStructured {
+            query: search_query.query.as_str(),
+            hits: hits.iter().map(structured_hit).collect(),
+        }),
+        is_error: false,
+        error_code: None,
+        resource_refs,
+    };
+    if read_matches && !hits.is_empty() {
+        let mut seen = std::collections::HashSet::new();
+        let indices = hits
+            .iter()
+            .filter(|hit| seen.insert(hit.index))
+            .map(|hit| json!({"index":hit.index}))
+            .collect::<Vec<_>>();
+        let read_args = json!({"messages":indices});
+        let (read, _) = super::read_messages::read_messages(
+            run_repository,
+            chat_repository,
+            group_chat_repository,
+            run_id,
+            call,
+            read_args.as_object().expect("object arguments"),
+            macros,
+        )
+        .await?;
+        if read.is_error {
+            result.content = format!(
+                "Search succeeded, but reading its matches failed: {}\n\n{}",
+                read.content, result.content
+            );
+            result.is_error = true;
+            result.error_code = read.error_code;
+            result.structured["readError"] = read.structured;
+        } else {
+            result.content.push_str("\n\n## Matched message reads\nThese are the same views as chat_read_messages. Do not repeat full reads already provided; oversized messages still require the indicated remaining pages.\n\n");
+            result.content.push_str(&read.content);
+            result.structured["messageReads"] = read.structured;
+        }
+    }
+    Ok((result, AgentToolEffect::None))
 }
 
 fn constrain_search_query(

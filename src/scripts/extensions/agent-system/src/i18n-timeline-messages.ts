@@ -3,6 +3,8 @@ export const TIMELINE_MESSAGES = {
     "timelineCharCount": "{count} chars",
     "timelineCancelled": "Agent cancelled",
     "timelineCompleted": "Agent completed",
+    "timelineOutputReady": "Reply visible · state updates pending",
+    "timelineOutputStateUnsaved": "Reply retained; state is not saved. Resume this run before continuing.",
     "timelineContent": "Content",
     "timelineDetailEmpty": "No details for this event.",
     "timelineDetailFieldErrorCode": "Error",

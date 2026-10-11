@@ -269,6 +269,12 @@ test('Agent context policy windows latest-first prompt history without mutating 
         { role: 'user', content: 'oldest' },
     ];
 
+    const files = ['persist/state.json'];
+    const initialized = contextPolicy.normalizeAgentContextPolicy({ initialWorkspaceFiles: files, initialBaselineFiles: files });
+    files.push('scratch/later.json');
+    assert.deepEqual(initialized.initialWorkspaceFiles, ['persist/state.json']);
+    assert.deepEqual(initialized.initialBaselineFiles, ['persist/state.json']);
+    assert.throws(() => contextPolicy.normalizeAgentContextPolicy({ initialWorkspaceFiles: ['x', 'x'] }), /context_files_invalid/);
     assert.deepEqual(contextPolicy.normalizeAgentContextPolicy({
         initialChatHistoryMessages: 0,
         includeActivatedWorldInfo: true,
@@ -350,6 +356,11 @@ test('Agent run controller tracks active runs until terminal events', async () =
     assert.equal(controller.getActiveAgentRun().runId, 'run-1');
 
     listener({ type: 'run_step_started', payload: {} });
+    listener({ type: 'chat_commit_completed', payload: { messageId: 'mes-1', isExplicit: false } });
+    assert.equal(controller.hasActiveAgentRun(), true);
+    await assert.rejects(controller.startAndWaitForAgentRun({ generationType: 'normal' }), /already active/);
+    listener({ type: 'persistent_state_metadata_updated', payload: { messageId: 'mes-1' } });
+    assert.equal(controller.hasActiveAgentRun(), true);
     listener({ type: 'run_completed', payload: { messageId: 'mes-1' } });
     const result = await run;
     unsubscribe();

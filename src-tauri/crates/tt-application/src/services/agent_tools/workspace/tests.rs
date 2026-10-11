@@ -87,6 +87,110 @@ fn classify_unknown_error_bubbles_up_for_host_failure() {
 }
 
 #[tokio::test]
+async fn ambiguous_json_is_rejected_without_mutating_source_or_copy_target() {
+    for source in [
+        r#"{"value":{"$serde_json::private::Number":"123"},"revision":0}"#,
+        r#"{"value":{"$serde_json::private::RawValue":"123"},"revision":0}"#,
+    ] {
+        let repository = TestWorkspaceRepository::with_file("output/state.json", source);
+        let mut session = AgentToolSession::default();
+        let read = workspace_call("workspace.read_file", json!({"path":"output/state.json"}));
+        let (result, _) = read_file(&repository, "run", &read, call_args(&read), &mut session)
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        for operations in [
+            json!([{"op":"replace","path":"/revision","value":1}]),
+            json!([{"op":"test","path":"/value","value":123},{"op":"replace","path":"/revision","value":1}]),
+        ] {
+            let call = workspace_call(
+                "workspace.apply_patch",
+                json!({"path":"output/state.json","json_ops":operations}),
+            );
+            let (result, effect) =
+                apply_patch(&repository, "run", &call, call_args(&call), &mut session)
+                    .await
+                    .unwrap();
+            assert!(result.is_error);
+            assert_eq!(
+                result.error_code.as_deref(),
+                Some("workspace.json_patch_invalid")
+            );
+            assert!(result.content.contains("json.reserved_member"));
+            assert!(matches!(effect, AgentToolEffect::None));
+            assert_eq!(
+                repository
+                    .read_text("run", &WorkspacePath::parse("output/state.json").unwrap())
+                    .await
+                    .unwrap()
+                    .text,
+                source
+            );
+            let call = workspace_call(
+                "workspace.write_file",
+                json!({"path":"output/copy.json","source_path":"output/state.json","json_ops":operations}),
+            );
+            let (result, effect) =
+                write_file(&repository, "run", &call, call_args(&call), &mut session)
+                    .await
+                    .unwrap();
+            assert!(result.is_error);
+            assert_eq!(
+                result.error_code.as_deref(),
+                Some("workspace.json_patch_invalid")
+            );
+            assert!(result.content.contains("json.reserved_member"));
+            assert!(matches!(effect, AgentToolEffect::None));
+            assert!(
+                repository
+                    .read_text("run", &WorkspacePath::parse("output/copy.json").unwrap())
+                    .await
+                    .is_err()
+            );
+        }
+        let call = workspace_call(
+            "workspace.write_file",
+            json!({"path":"output/state.json","content":source,"validate_json":true}),
+        );
+        let (result, effect) =
+            write_file(&repository, "run", &call, call_args(&call), &mut session)
+                .await
+                .unwrap();
+        assert!(result.is_error);
+        assert_eq!(result.error_code.as_deref(), Some("workspace.invalid_json"));
+        assert!(result.content.contains("json.reserved_member"));
+        assert!(matches!(effect, AgentToolEffect::None));
+        assert_eq!(
+            repository
+                .read_text("run", &WorkspacePath::parse("output/state.json").unwrap())
+                .await
+                .unwrap()
+                .text,
+            source
+        );
+        let call = workspace_call(
+            "workspace.write_file",
+            json!({"path":"output/raw-copy.json","source_path":"output/state.json"}),
+        );
+        let (result, _) = write_file(&repository, "run", &call, call_args(&call), &mut session)
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert_eq!(
+            repository
+                .read_text(
+                    "run",
+                    &WorkspacePath::parse("output/raw-copy.json").unwrap()
+                )
+                .await
+                .unwrap()
+                .text,
+            source
+        );
+    }
+}
+
+#[tokio::test]
 async fn workspace_read_invalid_path_returns_canonical_tool_error() {
     let repository = TestWorkspaceRepository::with_file("output/main.md", "existing");
     let mut session = AgentToolSession::default();

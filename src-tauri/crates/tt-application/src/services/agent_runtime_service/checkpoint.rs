@@ -119,7 +119,7 @@ impl AgentRuntimeService {
                     "this run has no checkpoint (it may predate checkpoints or have been cleaned)",
                 )
             })?;
-        let checkpoint: RunCheckpoint = serde_json::from_slice(&bytes)
+        let checkpoint: RunCheckpoint = tt_domain::json_input::from_slice(&bytes)
             .map_err(|error| invalid(format!("checkpoint cannot be decoded: {error}")))?;
         if checkpoint.schema_version != 1 || checkpoint.run.id != run_id {
             return Err(invalid("checkpoint version or run identity does not match"));

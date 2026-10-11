@@ -697,9 +697,17 @@ pub struct AgentReadEventsResultDto {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRunTimelineProjectionDto {
+    pub reply_publication: AgentReplyPublicationDto,
     pub foreground_invocation_ids: Vec<String>,
     pub invocations: Vec<AgentRunTimelineInvocationDto>,
     pub delegation_edges: Vec<AgentRunTimelineDelegationEdgeDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentReplyPublicationDto {
+    pub seq: u64,
+    pub pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

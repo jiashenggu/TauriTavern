@@ -504,12 +504,16 @@ impl ToolArguments {
         match raw {
             None | Some(Value::Null) => Self::empty(),
             Some(Value::String(text)) if text.trim().is_empty() => Self::empty(),
-            Some(Value::String(text)) => match serde_json::from_str::<Value>(text) {
+            Some(Value::String(text)) => match crate::json_input::from_str::<Value>(text) {
                 Ok(Value::Object(map)) => Self::Object(map),
                 Ok(Value::Null) => Self::empty(),
                 _ => Self::Invalid(text.clone()),
             },
-            Some(Value::Object(map)) => Self::Object(map.clone()),
+            Some(value @ Value::Object(map))
+                if crate::json_input::validate_value(value).is_ok() =>
+            {
+                Self::Object(map.clone())
+            }
             Some(value) => Self::Invalid(value.to_string()),
         }
     }
@@ -518,7 +522,7 @@ impl ToolArguments {
         match self {
             Self::Object(map) => Ok(map),
             Self::Invalid(raw) => Err(format!(
-                "arguments must be a JSON object; send `{{}}` when the call takes no arguments. Received: `{}`",
+                "arguments must be a JSON object without reserved Serde JSON members; send `{{}}` when the call takes no arguments. Received: `{}`",
                 quote_invalid_arguments(raw)
             )),
         }
@@ -879,6 +883,21 @@ mod tests {
             ),
         ] {
             assert_eq!(ToolArguments::decode(raw.as_ref()), expected, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn ambiguous_argument_objects_are_rejected_in_both_wire_encodings() {
+        for key in [
+            "$serde_json::private::Number",
+            "$serde_json::private::RawValue",
+        ] {
+            let object = json!({"json_ops":[{"op":"add","path":"/value","value":{key:"123"}}]});
+            for input in [serde_json::Value::String(object.to_string()), object] {
+                let decoded = ToolArguments::decode(Some(&input));
+                assert!(decoded.as_map().is_err());
+                assert_eq!(decoded.encode_for_replay(), "{}");
+            }
         }
     }
 

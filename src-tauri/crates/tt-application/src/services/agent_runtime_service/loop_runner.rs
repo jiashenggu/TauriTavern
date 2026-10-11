@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::commit::is_auto_commit_text_path;
 use super::commit_ledger::RunCommitLedger;
 use super::continuation::{InvocationFrame, InvocationStep, PendingToolTurn};
 use super::model_turn_display::model_turn_event_summary;
@@ -10,7 +11,7 @@ use super::prompt_snapshot::request_summary;
 use super::tool_execution::recoverable_tool_error;
 use super::{AgentCancelReceiver, AgentRuntimeService};
 use crate::errors::ApplicationError;
-use crate::services::agent_tools::{AGENT_AWAIT, AGENT_HANDOFF, AgentToolEffect};
+use crate::services::agent_tools::{AGENT_AWAIT, AGENT_DELEGATE, AGENT_HANDOFF, AgentToolEffect};
 use tt_domain::models::agent::profile::ResolvedAgentProfile;
 use tt_domain::models::agent::{
     AgentInvocationExitPolicy, AgentInvocationStatus, AgentModelContentPart, AgentModelMessage,
@@ -55,6 +56,32 @@ impl AgentRuntimeService {
             .await?
             .stream_enabled(profile.run.stream);
 
+        if !progress.context_loaded {
+            if progress.round == 1 && matches!(progress.step, InvocationStep::Model) {
+                let files = profile
+                    .context
+                    .initial_workspace_files
+                    .iter()
+                    .map(|path| (path.clone(), None))
+                    .collect::<Vec<_>>();
+                let views = self
+                    .read_context_files(
+                        prepared,
+                        &mut progress.session,
+                        &mut progress.gate,
+                        &files,
+                        true,
+                    )
+                    .await?;
+                if !views.is_empty() {
+                    prepared
+                        .request
+                        .messages
+                        .push(super::workspace_context::context_message(&views));
+                }
+            }
+            progress.context_loaded = true;
+        }
         loop {
             let round = progress.round;
             match &mut progress.step {
@@ -263,11 +290,15 @@ impl AgentRuntimeService {
                                         "sha256": file.sha256.as_str(),
                                     }),
                                 ));
-                                turn.auto_commit = if stream {
-                                    None
-                                } else {
-                                    Some((call.call_id.clone(), file))
-                                };
+                                if is_auto_commit_text_path(&file.path) {
+                                    let copied_body = result.structured.get("sourcePath").is_some()
+                                        && file.path.as_str() == profile.output.message_body_path;
+                                    turn.auto_commit = if stream && !copied_body {
+                                        None
+                                    } else {
+                                        Some((call.call_id.clone(), file))
+                                    };
+                                }
                             }
                             AgentToolEffect::WorkspaceFilesWritten {
                                 files,
@@ -320,7 +351,9 @@ impl AgentRuntimeService {
                                         "replacements": replacements,
                                     }),
                                 ));
-                                turn.auto_commit = Some((call.call_id.clone(), file));
+                                if is_auto_commit_text_path(&file.path) {
+                                    turn.auto_commit = Some((call.call_id.clone(), file));
+                                }
                             }
                             AgentToolEffect::ChatCommitRequested { .. } => {}
                             AgentToolEffect::Finish => {
@@ -486,8 +519,7 @@ fn remember_seen_child_results_from_await(
 ) {
     for result in tool_results {
         if !result.tool_id.is_builtin()
-            || result.tool_id.native_name() != AGENT_AWAIT
-            || result.is_error
+            || !matches!(result.tool_id.native_name(), AGENT_AWAIT | AGENT_DELEGATE)
         {
             continue;
         }

@@ -57,6 +57,12 @@ impl WorkspaceRepository for InvocationWorkspaceRepository<'_> {
                 root.writable = false;
                 continue;
             }
+            if root.path == "baseline" {
+                root.visible = !self.profile.context.initial_baseline_files.is_empty()
+                    && self.profile.workspace.visible_roots.iter().any(|root| root == "persist");
+                root.writable = false;
+                continue;
+            }
             root.visible = self
                 .profile
                 .workspace

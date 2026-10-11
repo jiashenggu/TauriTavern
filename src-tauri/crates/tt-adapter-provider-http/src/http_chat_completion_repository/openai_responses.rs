@@ -928,7 +928,10 @@ fn response_failure_error(response: &Value) -> DomainError {
 }
 
 fn parse_ws_event(payload: &[u8], operation: &str) -> Result<Value, DomainError> {
-    serde_json::from_slice(payload).map_err(|error| {
+    tt_domain::json_input::from_slice(payload).map_err(|error| {
+        if error.is_data() {
+            return DomainError::InvalidData(format!("model.upstream_invalid_response: OpenAI Responses JSON rejected ({operation}): {error}"));
+        }
         log_upstream_body_parse_failure(
             "OpenAI Responses",
             operation,
@@ -944,7 +947,10 @@ fn parse_ws_event(payload: &[u8], operation: &str) -> Result<Value, DomainError>
 }
 
 fn parse_sse_event(payload: &[u8], operation: &str) -> Result<Value, DomainError> {
-    serde_json::from_slice(payload).map_err(|error| {
+    tt_domain::json_input::from_slice(payload).map_err(|error| {
+        if error.is_data() {
+            return DomainError::InvalidData(format!("model.upstream_invalid_response: OpenAI Responses JSON rejected ({operation}): {error}"));
+        }
         log_upstream_body_parse_failure(
             "OpenAI Responses",
             operation,

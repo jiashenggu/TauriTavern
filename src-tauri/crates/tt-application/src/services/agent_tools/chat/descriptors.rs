@@ -76,6 +76,10 @@ pub(in crate::services::agent_tools) fn chat_search_descriptor() -> ToolDescript
                     "type": "integer",
                     "description": "Optional last 0-based message index to search."
                 },
+                "read_matches": {
+                    "type":"boolean",
+                    "description":"Also read every distinct returned hit using chat_read_messages in this call, without another model round. Requires chat.read_messages permission. Search results and read ordering are preserved; normal message-count and preview limits still apply. Reading failure is explicit and retains the search results. Use for focused queries when you need the matching original messages; defaults to false."
+                },
                 "scan_limit": {
                     "type": "integer",
                     "description": "Optional maximum number of recent messages to scan."

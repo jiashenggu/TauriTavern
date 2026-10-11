@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use crate::dto::agent_dto::{
-    AgentRunTimelineDelegationEdgeDto, AgentRunTimelineInvocationDto, AgentRunTimelineProjectionDto,
+    AgentReplyPublicationDto, AgentRunTimelineDelegationEdgeDto, AgentRunTimelineInvocationDto,
+    AgentRunTimelineProjectionDto,
 };
 use crate::errors::ApplicationError;
 use tt_domain::models::agent::{
@@ -11,9 +12,11 @@ use tt_domain::models::agent::{
 pub(super) fn build_run_timeline_projection(
     invocations: &[AgentInvocation],
     tasks: &[AgentTaskRecord],
+    reply_publication: AgentReplyPublicationDto,
 ) -> Result<AgentRunTimelineProjectionDto, ApplicationError> {
     validate_projection_graph(invocations, tasks)?;
     Ok(AgentRunTimelineProjectionDto {
+        reply_publication,
         foreground_invocation_ids: foreground_invocation_ids(invocations),
         invocations: invocation_nodes(invocations),
         delegation_edges: delegation_edges(tasks),

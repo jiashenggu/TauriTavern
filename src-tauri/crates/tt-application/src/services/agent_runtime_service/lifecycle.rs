@@ -339,6 +339,7 @@ impl AgentRuntimeService {
             .read_events(
                 &dto.run_id,
                 AgentRunEventReadQuery {
+                    event_types: None,
                     after_seq: dto.after_seq,
                     before_seq: dto.before_seq,
                     limit: dto.limit,
@@ -352,7 +353,32 @@ impl AgentRuntimeService {
                 .list_invocations(&dto.run_id)
                 .await?;
             let tasks = self.invocation_repository.list_tasks(&dto.run_id).await?;
-            Some(build_run_timeline_projection(&invocations, &tasks)?)
+            let publication_events = self
+                .run_repository
+                .read_events(
+                    &dto.run_id,
+                    AgentRunEventReadQuery {
+                        event_types: Some(vec![
+                            "chat_commit_completed".into(),
+                            "persistent_state_metadata_updated".into(),
+                        ]),
+                        after_seq: None,
+                        before_seq: Some(u64::MAX),
+                        limit: 1,
+                        invocation_id: None,
+                    },
+                )
+                .await?;
+            let latest = publication_events.last();
+            let reply_publication = crate::dto::agent_dto::AgentReplyPublicationDto {
+                seq: latest.map_or(0, |event| event.seq),
+                pending: latest.is_some_and(|event| event.event_type == "chat_commit_completed"),
+            };
+            Some(build_run_timeline_projection(
+                &invocations,
+                &tasks,
+                reply_publication,
+            )?)
         } else {
             None
         };

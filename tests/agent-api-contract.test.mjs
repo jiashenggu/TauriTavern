@@ -769,9 +769,10 @@ test('agent live write reuses auto checkpoints and stops after the first explici
             type: 'replace',
             call: liveWriteCall(content),
         });
-        replace('draft');
-        await waitFor(() => script.chat[0]?.mes === 'draft');
-        const message = script.chat[0];
+        replace('');
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.equal(script.chat.length, 0);
 
         durableListener({
             type: 'chat_commit_requested',
@@ -784,7 +785,9 @@ test('agent live write reuses auto checkpoints and stops after the first explici
             }),
         });
         await waitFor(() => resolutions.length === 1);
+        const message = script.chat[0];
         assert.equal(message.mes, 'patched');
+        assert.equal(message.extra.tauritavern.agent.persistStateStatus, 'not_committed');
         assert.equal(liveStopped, false);
 
         replace('after checkpoint');

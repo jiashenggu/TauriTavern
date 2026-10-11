@@ -71,6 +71,19 @@ export function subAgentStatusLabel(status: string, tr: AgentSystemTr): string {
     return label ? tr(label) : status;
 }
 
+export function hasUnpublishedReply(
+    events: readonly TauriTavernAgentRunEvent[],
+    publication: TauriTavernAgentRunTimelineProjection['replyPublication'],
+): boolean {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index];
+        if (!event || event.seq <= publication.seq) break;
+        if (event.type === 'persistent_state_metadata_updated') return false;
+        if (event.type === 'chat_commit_completed') return true;
+    }
+    return publication.pending;
+}
+
 export function runTimelineHeading(
     terminalType: string,
     isRunning: boolean,

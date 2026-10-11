@@ -3,13 +3,14 @@ use std::time::Instant;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use super::context_refs::ContextReference;
 use super::policy::validate_subagent_target;
 use super::tool_error::tool_error_outcome;
 use crate::errors::ApplicationError;
 use crate::services::agent_profile_service::AgentProfileResolveInput;
-use crate::services::agent_runtime_service::AgentCancelReceiver;
-use crate::services::agent_runtime_service::AgentRuntimeService;
-use crate::services::agent_tools::{AgentToolDispatchOutcome, AgentToolEffect};
+use crate::services::agent_runtime_service::{AgentRuntimeService, PreparedInvocation};
+use crate::services::agent_tools::{AgentToolDispatchOutcome, AgentToolEffect, AgentToolSession};
+use crate::services::tool_request_gate::ToolRequestGate;
 use tt_domain::models::agent::profile::{AgentProfileId, ResolvedAgentProfile};
 use tt_domain::models::agent::{AgentRunEventLevel, AgentTaskStatus, AgentToolResult};
 use tt_domain::models::tool::ToolInvocation;
@@ -21,30 +22,47 @@ const MAX_AGENT_DELEGATION_TASK_FIELD_CHARS: usize = 8_000;
 struct AgentDelegateArgs {
     agent_id: String,
     task: Value,
+    #[serde(default)]
+    wait: bool,
+    #[serde(default)]
+    read_artifacts: bool,
+    #[serde(default)]
+    context_refs: Vec<ContextReference>,
 }
 
 impl AgentRuntimeService {
     pub(in crate::services::agent_runtime_service) async fn dispatch_agent_delegate_tool(
         &self,
-        run_id: &str,
-        invocation_id: &str,
+        prepared: &PreparedInvocation,
         call: &ToolInvocation,
         args: &Map<String, Value>,
-        profile: &ResolvedAgentProfile,
-        _cancel: &AgentCancelReceiver,
+        session: &AgentToolSession,
+        gate: &mut ToolRequestGate,
     ) -> Result<AgentToolDispatchOutcome, ApplicationError> {
+        let run_id = prepared.invocation.run_id.as_str();
+        let invocation_id = prepared.invocation.id.as_str();
+        let profile = &prepared.profile;
         let started = Instant::now();
-        let args = match serde_json::from_value::<AgentDelegateArgs>(Value::Object(args.clone())) {
-            Ok(args) => args,
-            Err(error) => {
-                return Ok(tool_error_outcome(
-                    call,
-                    "tool.invalid_arguments",
-                    &format!("invalid agent.delegate arguments: {error}"),
-                    started.elapsed().as_millis(),
-                ));
-            }
-        };
+        let mut args =
+            match serde_json::from_value::<AgentDelegateArgs>(Value::Object(args.clone())) {
+                Ok(args) => args,
+                Err(error) => {
+                    return Ok(tool_error_outcome(
+                        call,
+                        "tool.invalid_arguments",
+                        &format!("invalid agent.delegate arguments: {error}"),
+                        started.elapsed().as_millis(),
+                    ));
+                }
+            };
+        if args.read_artifacts && !args.wait {
+            return Ok(tool_error_outcome(
+                call,
+                "tool.invalid_arguments",
+                "readArtifacts on delegate requires wait=true",
+                started.elapsed().as_millis(),
+            ));
+        }
         if let Err(message) = validate_delegate_task_packet(&args.task) {
             return Ok(tool_error_outcome(
                 call,
@@ -114,6 +132,63 @@ impl AgentRuntimeService {
             ));
         }
 
+        if args.task.get("referenceMaterials").is_some() {
+            return Ok(tool_error_outcome(
+                call,
+                "tool.invalid_arguments",
+                "referenceMaterials is reserved for runtime-resolved contextRefs",
+                started.elapsed().as_millis(),
+            ));
+        }
+        if args.context_refs.len() > 16 {
+            return Ok(tool_error_outcome(
+                call,
+                "agent.context_reference_invalid",
+                "at most16 references are allowed",
+                started.elapsed().as_millis(),
+            ));
+        }
+        let mut capabilities = args
+            .context_refs
+            .iter()
+            .map(|reference| tt_domain::models::tool::ToolId::builtin(reference.tool_name()))
+            .collect::<Result<Vec<_>, _>>()?;
+        if args.wait {
+            capabilities.push(tt_domain::models::tool::ToolId::builtin("agent.await")?);
+        }
+        if let Err(error) =
+            gate.check_capabilities(&prepared.tool_snapshot, &prepared.tool_turn, &capabilities)
+        {
+            return Ok(tool_error_outcome(
+                call,
+                error.code(),
+                &error.to_string(),
+                started.elapsed().as_millis(),
+            ));
+        }
+        if args.wait {
+            capabilities.pop();
+        }
+        gate.reserve_capabilities(&prepared.tool_snapshot, &prepared.tool_turn, &capabilities)
+            .map_err(|error| ApplicationError::ValidationError(error.to_string()))?;
+        if !args.context_refs.is_empty() {
+            match self
+                .resolve_context_references(prepared, session, &args.context_refs)
+                .await
+            {
+                Ok(materials) => args.task["referenceMaterials"] = json!(materials),
+                Err(ApplicationError::ValidationError(message))
+                | Err(ApplicationError::PermissionDenied(message)) => {
+                    return Ok(tool_error_outcome(
+                        call,
+                        "agent.context_reference_invalid",
+                        &message,
+                        started.elapsed().as_millis(),
+                    ));
+                }
+                Err(error) => return Err(error),
+            }
+        }
         let task = self
             .create_child_task(
                 run_id,

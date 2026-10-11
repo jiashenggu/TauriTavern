@@ -27,13 +27,6 @@ impl ToolRequestGate {
             });
         }
 
-        let binding = snapshot.binding(&invocation.tool_id).ok_or_else(|| {
-            ToolRequestGateError::ToolNotInSnapshot {
-                tool_id: invocation.tool_id.clone(),
-                snapshot_id: snapshot.id().clone(),
-            }
-        })?;
-
         match turn.choice() {
             ToolChoice::None => {
                 return Err(ToolRequestGateError::ToolChoiceNone {
@@ -49,30 +42,65 @@ impl ToolRequestGate {
             ToolChoice::Auto | ToolChoice::Required | ToolChoice::Specific(_) => {}
         }
 
-        let max_calls = snapshot.max_calls_per_invocation();
-        if self.total_calls >= max_calls {
-            return Err(ToolRequestGateError::InvocationBudgetExhausted { max_calls });
-        }
+        self.reserve_capabilities(snapshot, turn, std::slice::from_ref(&invocation.tool_id))
+    }
 
-        let tool_calls = self
-            .calls_per_tool
-            .get(&invocation.tool_id)
-            .copied()
-            .unwrap_or(0);
-        if let Some(max_calls) = binding.max_calls()
-            && tool_calls >= max_calls
-        {
-            return Err(ToolRequestGateError::ToolBudgetExhausted {
-                tool_id: invocation.tool_id.clone(),
-                max_calls,
+    pub(crate) fn reserve_capabilities(
+        &mut self,
+        snapshot: &InvocationToolSnapshot,
+        turn: &ToolTurnContract,
+        tools: &[ToolId],
+    ) -> Result<(), ToolRequestGateError> {
+        self.check_capabilities(snapshot, turn, tools)?;
+        self.total_calls += tools.len();
+        for tool_id in tools {
+            *self.calls_per_tool.entry(tool_id.clone()).or_default() += 1;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_capabilities(
+        &self,
+        snapshot: &InvocationToolSnapshot,
+        turn: &ToolTurnContract,
+        tools: &[ToolId],
+    ) -> Result<(), ToolRequestGateError> {
+        if turn.snapshot_id() != snapshot.id() {
+            return Err(ToolRequestGateError::TurnSnapshotMismatch {
+                turn_snapshot_id: turn.snapshot_id().clone(),
+                invocation_snapshot_id: snapshot.id().clone(),
             });
         }
-
-        self.total_calls += 1;
-        *self
-            .calls_per_tool
-            .entry(invocation.tool_id.clone())
-            .or_insert(0) += 1;
+        let mut counts = HashMap::<ToolId, usize>::new();
+        for tool_id in tools {
+            let binding = snapshot
+                .binding(tool_id)
+                .filter(|_| turn.tools().contains(tool_id))
+                .ok_or_else(|| ToolRequestGateError::ToolNotInSnapshot {
+                    tool_id: tool_id.clone(),
+                    snapshot_id: snapshot.id().clone(),
+                })?;
+            if matches!(turn.choice(), ToolChoice::None) {
+                return Err(ToolRequestGateError::ToolChoiceNone {
+                    tool_id: tool_id.clone(),
+                });
+            }
+            let count = counts.entry(tool_id.clone()).or_default();
+            *count += 1;
+            let previous = self.calls_per_tool.get(tool_id).copied().unwrap_or(0);
+            if let Some(max_calls) = binding.max_calls()
+                && *count > max_calls.saturating_sub(previous)
+            {
+                return Err(ToolRequestGateError::ToolBudgetExhausted {
+                    tool_id: tool_id.clone(),
+                    max_calls,
+                });
+            }
+        }
+        let max_calls = snapshot.max_calls_per_invocation();
+        if tools.len() > max_calls.saturating_sub(self.total_calls) {
+            return Err(ToolRequestGateError::InvocationBudgetExhausted { max_calls });
+        }
         Ok(())
     }
 }
@@ -112,6 +140,21 @@ pub(crate) enum ToolRequestGateError {
         "agent.tool_budget_exhausted: tool `{tool_id}` call budget is exhausted (max {max_calls})"
     )]
     ToolBudgetExhausted { tool_id: ToolId, max_calls: usize },
+}
+
+impl ToolRequestGateError {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::InvocationBudgetExhausted { .. } | Self::ToolBudgetExhausted { .. } => {
+                "agent.tool_budget_exhausted"
+            }
+            Self::TurnSnapshotMismatch { .. } => "tool.turn_snapshot_mismatch",
+            Self::ToolNotInSnapshot { .. } => "model.unknown_tool_call",
+            Self::ToolChoiceNone { .. } | Self::ToolChoiceSpecific { .. } => {
+                "model.tool_choice_violation"
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -210,6 +253,46 @@ mod tests {
         assert!(matches!(
             gate.authorize_and_reserve(&snapshot, &allowed_turn, &invocation("over", first)),
             Err(ToolRequestGateError::InvocationBudgetExhausted { max_calls: 1 })
+        ));
+    }
+
+    #[test]
+    fn combined_reservations_are_atomic_and_survive_checkpoint_restore() {
+        let read = ToolId::builtin("workspace.read_file").unwrap();
+        let finish = ToolId::builtin("workspace.finish").unwrap();
+        let unlimited = ToolId::builtin("other").unwrap();
+        let snapshot = InvocationToolSnapshot::try_new(
+            ToolSnapshotId::parse("combined").unwrap(),
+            vec![
+                binding(read.clone(), Some(1)),
+                binding(finish.clone(), Some(2)),
+                binding(unlimited.clone(), None),
+            ],
+            3,
+        )
+        .unwrap();
+        let turn = ToolTurnContract::all(&snapshot, ToolChoice::Auto).unwrap();
+        let mut gate = ToolRequestGate::default();
+        assert!(matches!(
+            gate.reserve_capabilities(&snapshot, &turn, &[read.clone(), read.clone()]),
+            Err(ToolRequestGateError::ToolBudgetExhausted { .. })
+        ));
+        gate.authorize_and_reserve(&snapshot, &turn, &invocation("read", read.clone()))
+            .unwrap();
+        assert!(matches!(
+            gate.reserve_capabilities(&snapshot, &turn, &[finish.clone(), read.clone()]),
+            Err(ToolRequestGateError::ToolBudgetExhausted { .. })
+        ));
+        gate = serde_json::from_value(serde_json::to_value(gate).unwrap()).unwrap();
+        assert!(matches!(
+            gate.reserve_capabilities(&snapshot, &turn, &[read]),
+            Err(ToolRequestGateError::ToolBudgetExhausted { .. })
+        ));
+        gate.reserve_capabilities(&snapshot, &turn, &[finish.clone(), finish])
+            .unwrap();
+        assert!(matches!(
+            gate.reserve_capabilities(&snapshot, &turn, &[unlimited]),
+            Err(ToolRequestGateError::InvocationBudgetExhausted { .. })
         ));
     }
 

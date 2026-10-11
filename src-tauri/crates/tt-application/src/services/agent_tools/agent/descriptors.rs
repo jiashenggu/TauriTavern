@@ -70,7 +70,18 @@ pub(in crate::services::agent_tools) fn agent_delegate_descriptor() -> ToolDescr
                         }
                     },
                     "required": ["objective"]
-                }
+                },
+                "contextRefs": {
+                    "type":"array", "maxItems":16,
+                    "description":"Explicitly copy selected source data into the task instead of transcribing it. Workspace refs require your prior full read and unchanged SHA; pointer optionally selects a JSON value. Chat indexes and activated-world refs use your read tools and frozen macros. Full sources only: missing, forbidden or preview-only data reject delegation. Total96000 characters. Sources are frozen in the task; this grants no child file/tool permissions. Do not duplicate these materials in task.context; keep decisions, constraints and stopping point there.",
+                    "items":{"oneOf":[
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"workspace"},"path":{"type":"string"},"pointer":{"type":"string"}},"required":["kind","path"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"chat"},"index":{"type":"integer","minimum":0}},"required":["kind","index"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"worldInfo"},"ref":{"type":"string"}},"required":["kind","ref"]}
+                    ]}
+                },
+                "wait": { "type": "boolean", "description": "Wait for this task in the same call instead of issuing agent_await separately. Requires agent.await permission; defaults to false." },
+                "readArtifacts": { "type": "boolean", "description": "With wait=true, include bounded artifact file views using the caller's read permissions and record their SHA/read coverage. Defaults to false." }
             },
             "required": ["agentId", "task"]
         }),
@@ -101,7 +112,8 @@ pub(in crate::services::agent_tools) fn agent_await_descriptor() -> ToolDescript
                 "timeoutMs": {
                     "type": "integer",
                     "description": "Optional wait timeout in milliseconds. Defaults to 120000; maximum is 300000."
-                }
+                },
+                "readArtifacts": { "type": "boolean", "description": "Include bounded views of completed task artifacts using caller permissions; successful views are recorded as file reads with SHA and coverage. Defaults to false." }
             }
         }),
         output_schema: None,

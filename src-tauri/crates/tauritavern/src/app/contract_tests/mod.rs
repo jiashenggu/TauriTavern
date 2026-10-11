@@ -654,6 +654,7 @@ async fn read_agent_events(
         .read_events(
             run_id,
             AgentRunEventReadQuery {
+                event_types: None,
                 after_seq: Some(0),
                 before_seq: None,
                 limit: 300,

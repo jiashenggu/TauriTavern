@@ -6,10 +6,10 @@ import type {
 } from './RunTimelineContract';
 
 export function emptyTimelineProjection(): TimelineProjection {
-    return { foregroundInvocationIds: [], invocations: [], delegationEdges: [] };
+    return { foregroundInvocationIds: [], invocations: [], delegationEdges: [], replyPublication: { seq: 0, pending: false } };
 }
 
-export function normalizeTimelineProjection(value: unknown): TimelineProjection {
+export function normalizeTimelineProjection(value: unknown, previous?: TimelineProjection): TimelineProjection {
     if (!plainObject(value)) {
         throw new Error('agent.timeline_projection_invalid: readEvents.timelineProjection must be an object');
     }
@@ -22,7 +22,16 @@ export function normalizeTimelineProjection(value: unknown): TimelineProjection 
     if (!Array.isArray(value.delegationEdges)) {
         throw new Error('agent.timeline_projection_invalid: delegationEdges must be an array');
     }
+    const publication = value.replyPublication;
+    if (!plainObject(publication) || typeof publication.seq !== 'number'
+        || !Number.isSafeInteger(publication.seq) || publication.seq < 0
+        || typeof publication.pending !== 'boolean' || (publication.seq === 0 && publication.pending)) {
+        throw new Error('agent.timeline_projection_invalid: replyPublication must contain a valid sequence and pending flag');
+    }
+    const replyPublication = { seq: publication.seq, pending: publication.pending };
     return {
+        replyPublication: previous && previous.replyPublication.seq > replyPublication.seq
+            ? previous.replyPublication : replyPublication,
         foregroundInvocationIds: value.foregroundInvocationIds.map(normalizeInvocationId),
         invocations: value.invocations.map(normalizeProjectionInvocation),
         delegationEdges: value.delegationEdges.map(normalizeProjectionDelegationEdge),

@@ -69,6 +69,7 @@ test('legacy commit completions require explicit request evidence and commit fai
 
 test('SubAgent projection does not flatten child lifecycle into the foreground chain', () => {
     const projection: TimelineProjection = {
+        replyPublication: { seq: 0, pending: false },
         foregroundInvocationIds: ['inv_root'],
         invocations: [
             {
@@ -161,6 +162,7 @@ test('SubAgent projection does not flatten child lifecycle into the foreground c
 
 test('handoff projection keeps one foreground boundary and its typed detail target', () => {
     const projection: TimelineProjection = {
+        replyPublication: { seq: 0, pending: false },
         foregroundInvocationIds: ['inv_root', 'inv-editor'],
         invocations: [],
         delegationEdges: [{

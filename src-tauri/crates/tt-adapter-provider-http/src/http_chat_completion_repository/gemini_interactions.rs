@@ -65,7 +65,10 @@ impl InteractionsStreamState {
             ));
         }
 
-        let event = serde_json::from_slice::<Value>(raw_payload).map_err(|error| {
+        let event = tt_domain::json_input::from_slice::<Value>(raw_payload).map_err(|error| {
+            if error.is_data() {
+                return invalid_stream(format!("JSON rejected: {error}"));
+            }
             DomainError::transient(format!(
                 "model.upstream_invalid_response: Gemini Interactions stream event is not valid JSON: {error}"
             ))
@@ -686,8 +689,8 @@ fn finish_function_call(
             .ok_or_else(|| invalid_stream("function_call arguments must be an object"))?;
         Value::Object(arguments.clone()).to_string()
     } else {
-        let arguments =
-            serde_json::from_str::<Value>(&active.argument_fragments).map_err(|error| {
+        let arguments = tt_domain::json_input::from_str::<Value>(&active.argument_fragments)
+            .map_err(|error| {
                 invalid_stream(format!(
                     "function_call arguments_delta is not valid JSON: {error}"
                 ))

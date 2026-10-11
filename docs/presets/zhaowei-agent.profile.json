@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 3,
+  "kind": "tauritavern.agentProfile",
+  "id": "zhaowei-agent",
+  "displayName": "照微·Agent",
+  "description": "主控负责剧情裁决、核对、提交及持久记忆，正文委派给 zhaowei-scene-writer。主控模型沿用当前连接；需另配置写作者模型。正常历史窗口为最近6条消息，适用于新开局或已有完整持久记忆的聊天；旧档先核对初始化资料。旧数据库插件、条件和面板不自动迁移或停用。",
+  "preset": {
+    "mode": "currentPromptSnapshot",
+    "required": false
+  },
+  "model": {
+    "mode": "currentPromptSnapshot"
+  },
+  "run": {
+    "presentation": "foreground",
+    "stream": true,
+    "directRunnable": true
+  },
+  "context": {
+    "initialChatHistoryMessages": 6,
+    "includeActivatedWorldInfo": true,
+    "initialWorkspaceFiles": ["persist/state.json"],
+    "initialBaselineFiles": ["persist/state.json"]
+  },
+  "instructions": {},
+  "delegation": {
+    "canDelegate": true,
+    "maxConcurrentInvocations": 1,
+    "canHandoff": false,
+    "callable": false,
+    "allowAsSubagent": false,
+    "allowAsHandoffTarget": false,
+    "allowNestedDelegation": false
+  },
+  "tools": {
+    "allow": [
+      "builtin:agent.list",
+      "builtin:agent.delegate",
+      "builtin:agent.await",
+      "builtin:chat.search",
+      "builtin:chat.read_messages",
+      "builtin:worldinfo.read_activated",
+      "builtin:workspace.list_files",
+      "builtin:workspace.search_files",
+      "builtin:workspace.read_file",
+      "builtin:workspace.write_file",
+      "builtin:workspace.apply_patch",
+      "builtin:workspace.commit",
+      "builtin:workspace.finish"
+    ],
+    "deny": [],
+    "maxRounds": 24,
+    "maxCallsPerRun": 48
+  },
+  "skills": {
+    "visible": [
+      "*"
+    ],
+    "deny": [
+      "*"
+    ]
+  },
+  "workspace": {
+    "visibleRoots": [
+      "output",
+      "persist",
+      "scratch"
+    ],
+    "writableRoots": [
+      "output",
+      "persist",
+      "scratch"
+    ]
+  },
+  "plan": {
+    "mode": "none",
+    "nodes": []
+  },
+  "output": {
+    "artifacts": [
+      {
+        "id": "main",
+        "path": "output/main.md",
+        "kind": "markdown",
+        "target": "messageBody",
+        "required": true,
+        "assemblyOrder": 0
+      }
+    ]
+  }
+}

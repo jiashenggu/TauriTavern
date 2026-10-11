@@ -37,7 +37,7 @@ test('history timelines support multiple roots and clean every dialog path', asy
             type: 'workspace_file_written',
             payload: { path: `${runId}.txt`, chars: 5, words: 1 },
         }],
-        timelineProjection: { foregroundInvocationIds: [], invocations: [], delegationEdges: [] },
+        timelineProjection: { foregroundInvocationIds: [], invocations: [], delegationEdges: [], replyPublication: { seq: 0, pending: false } },
     });
     Object.defineProperty(window, '__TAURITAVERN__', {
         configurable: true,

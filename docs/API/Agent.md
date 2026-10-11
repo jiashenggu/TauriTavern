@@ -70,7 +70,7 @@ const { events, timelineProjection } = await agent.readEvents({
 | `readModelTurn({ runId, invocationId?, round, maxChars? })` | assistant 文本、可见 reasoning、工具调用与 provider 摘要 |
 | `readTaskDetail({ runId, taskId, includeResult? })` | 任务说明、当前状态及按需读取的结果 |
 
-`beforeSeq` 读取该序号之前最近的一页，`afterSeq` 用于向前追新。`invocationId` 先筛选归属再分页，适合子 Agent 的局部 Timeline。`timelineProjection` 包含整个 Run 的 Invocation 和委派关系，独立于当前事件页。
+`beforeSeq` 读取该序号之前最近的一页，`afterSeq` 用于向前追新。`invocationId` 先筛选归属再分页，适合子 Agent 的局部 Timeline。`timelineProjection` 包含整个 Run 的 Invocation、委派关系和 `replyPublication: { seq, pending }`，独立于当前事件页及 Invocation 筛选。`seq` 是最近一次正文提交确认或持久 metadata 保存确认的事件序号；尚无此类事件时为0且 pending=false。pending=true 表示正文已确认而状态尚未发布。客户端以更新的实时事件覆盖该投影，不因翻页或较旧响应撤销已知的保存确认。
 
 `readModelTurn` 的 `round` 从 1 开始，省略 `invocationId` 时读取根 Agent。`maxChars` 限制展示文本，字词总数仍对应完整内容。
 

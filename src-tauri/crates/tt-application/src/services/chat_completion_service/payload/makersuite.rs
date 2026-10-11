@@ -962,6 +962,43 @@ mod tests {
     }
 
     #[test]
+    fn native_json_schema_declarations_survive_google_wire_translation() {
+        use crate::services::agent_tools::BuiltinAgentToolRegistry;
+        let registry = BuiltinAgentToolRegistry::all();
+        let descriptors = registry
+            .catalog()
+            .iter()
+            .filter(|tool| {
+                matches!(
+                    tool.id.native_name(),
+                    "agent.delegate" | "workspace.write_file" | "workspace.apply_patch"
+                )
+            })
+            .collect::<Vec<_>>();
+        let tools = descriptors
+            .iter()
+            .map(|tool| {
+                json!({"type":"function","function":{
+                    "name":tool.id.native_name().replace('.', "_"),
+                    "parametersJsonSchema":tool.input_schema,
+                }})
+            })
+            .collect::<Vec<_>>();
+        for builder in [build, build_vertexai, super::build_custom] {
+            let payload = json!({"model":"gemini-2.5-flash","messages":[{"role":"user","content":"Update state"}],"tools":tools});
+            let (_, body) = builder(payload.as_object().unwrap().clone()).unwrap();
+            let declarations = body["tools"][0]["function_declarations"]
+                .as_array()
+                .unwrap();
+            assert_eq!(declarations.len(), descriptors.len());
+            for (declaration, descriptor) in declarations.iter().zip(&descriptors) {
+                assert_eq!(declaration["parametersJsonSchema"], descriptor.input_schema);
+                assert!(declaration.get("parameters").is_none());
+            }
+        }
+    }
+
+    #[test]
     fn makersuite_fixed_sampling_models_only_forward_seed() {
         let build_config = |model: &str| {
             let payload = json!({

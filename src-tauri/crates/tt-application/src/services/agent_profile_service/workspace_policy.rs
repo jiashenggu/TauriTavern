@@ -58,6 +58,17 @@ pub fn workspace_roots_from_profile(profile: &ResolvedAgentProfile) -> Vec<Works
         writable: false,
         commit: WorkspaceRootCommit::Never,
     });
+    if !profile.context.initial_baseline_files.is_empty() {
+        roots.push(WorkspaceRootSpec {
+            path: "baseline".to_string(),
+            lifecycle: WorkspaceRootLifecycle::Run,
+            scope: WorkspaceRootScope::Run,
+            mount: WorkspaceRootMount::Materialized,
+            visible: true,
+            writable: false,
+            commit: WorkspaceRootCommit::Never,
+        });
+    }
     roots
 }
 

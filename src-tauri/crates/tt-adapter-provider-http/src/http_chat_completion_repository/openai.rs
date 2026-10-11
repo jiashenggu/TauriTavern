@@ -195,8 +195,14 @@ impl OpenAiChatAccumulator {
             return Ok(());
         }
 
-        let mut event = serde_json::from_slice::<Value>(raw_event).map_err(|error| {
-            invalid_openai_response(format!("event is not valid JSON: {error}"))
+        let mut event = tt_domain::json_input::from_slice::<Value>(raw_event).map_err(|error| {
+            if error.is_data() {
+                DomainError::InvalidData(format!(
+                    "model.upstream_invalid_response: OpenAI JSON rejected: {error}"
+                ))
+            } else {
+                invalid_openai_response(format!("event is not valid JSON: {error}"))
+            }
         })?;
         let event = event
             .as_object_mut()

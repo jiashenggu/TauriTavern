@@ -411,6 +411,50 @@ fn rejects_truncated_agent_turns() {
 }
 
 #[test]
+fn gemini_agent_tools_preserve_reference_variants_and_arbitrary_json_values() {
+    let registry = BuiltinAgentToolRegistry::all();
+    for (format, field) in [
+        ("gemini_generate_content", "parametersJsonSchema"),
+        ("gemini_interactions", "parameters"),
+    ] {
+        let mut request = basic_request("custom", Some(format), Vec::new());
+        request.tools = [
+            "agent.delegate",
+            "workspace.write_file",
+            "workspace.apply_patch",
+        ]
+        .iter()
+        .map(|name| model_tool(&registry, name))
+        .collect();
+        let dto = encode_chat_completion_request(&request, false).unwrap();
+        let functions = dto.payload["tools"].as_array().unwrap();
+        for (function, tool) in functions.iter().zip(&request.tools) {
+            assert_eq!(
+                function["function"][field], tool.input_schema,
+                "{format}: {}",
+                tool.model_alias
+            );
+            if field == "parametersJsonSchema" {
+                assert!(function["function"].get("parameters").is_none());
+            }
+        }
+        let values: Value = serde_json::from_str(
+            r#"[null,true,123456789012345678901,0.123456789012345678901,"text",[1],{"a":2}]"#,
+        )
+        .unwrap();
+        for value in values.as_array().unwrap() {
+            let args = json!({"path":"persist/state.json","json_ops":[{"op":"add","path":"/value","value":value}]});
+            let response = json!({"choices":[{"message":{"tool_calls":[{"id":"patch","type":"function","function":{"name":"workspace_apply_patch","arguments":args.to_string()}}]}}]});
+            let decoded = decode_chat_completion_response(response, &request.tools).unwrap();
+            assert_eq!(
+                decoded.tool_calls[0].arguments.as_map().unwrap()["json_ops"][0]["value"],
+                *value
+            );
+        }
+    }
+}
+
+#[test]
 fn gemini_schema_sanitizer_projects_nested_objects_to_agent_friendly_schema() {
     let schema = json!({
         "type": "object",

@@ -254,10 +254,18 @@ pub fn materialize_agent_system_prompt(
             ),
         }
         if has_tool(tools, "workspace.finish") {
-            lines.push(format!(
-                "# **Important**: Do not answer in plain text. Finish by calling {}.",
-                model_alias(tools, "workspace.finish")
-            ));
+            if has_tool(tools, "workspace.commit") {
+                lines.push(format!(
+                    "# **Important**: Do not answer in plain text. Once all reviewed files and workspace changes are prepared, call {} with finish=true to commit and end after confirmation; alternatively commit earlier and call {} when remaining work is complete.",
+                    model_alias(tools, "workspace.commit"),
+                    model_alias(tools, "workspace.finish")
+                ));
+            } else {
+                lines.push(format!(
+                    "# **Important**: Do not answer in plain text. Finish by calling {}.",
+                    model_alias(tools, "workspace.finish")
+                ));
+            }
         } else if has_tool(tools, AGENT_HANDOFF_TOOL) {
             lines.push(format!(
                 "# **Important**: Do not answer in plain text. Continue by calling {}.",
@@ -265,61 +273,7 @@ pub fn materialize_agent_system_prompt(
             ));
         }
     }
-    if has_tool(tools, "workspace.commit") && has_tool(tools, "workspace.finish") {
-        lines.extend([
-            String::new(),
-            format!(
-                "# Basic tool calling flow (adjusted based on the actual situation, but the flow must include {} + {}):",
-                model_alias(tools, "workspace.commit"),
-                model_alias(tools, "workspace.finish")
-            ),
-            String::new(),
-            "A simple template you can follow:".to_string(),
-            "    (thoughts before actions)".to_string(),
-            "    (call tools)(optional)".to_string(),
-            String::new(),
-            format!(
-                "    Now I need to call \"{}\" once.",
-                model_alias(tools, "workspace.commit")
-            ),
-            format!(
-                "    Good, it has been committed. Finally, don't forget to call \"{}\".",
-                model_alias(tools, "workspace.finish")
-            ),
-            String::new(),
-            "You also can follow commit-N-times template:".to_string(),
-            "    (thoughts before actions)".to_string(),
-        ]);
-        if has_tool(tools, "workspace.read_file") {
-            lines.push(format!(
-                "    ({})",
-                model_alias(tools, "workspace.read_file")
-            ));
-        }
-        if has_tool(tools, "worldinfo.read_activated") {
-            lines.push(format!(
-                "    ({})",
-                model_alias(tools, "worldinfo.read_activated")
-            ));
-        }
-        if has_tool(tools, "skill.list") {
-            lines.push(format!("    ({})", model_alias(tools, "skill.list")));
-        }
-        lines.extend([
-            format!(
-                "    (call {} with append mode)",
-                model_alias(tools, "workspace.commit")
-            ),
-            "    (think)".to_string(),
-            "    (edit if necessary)".to_string(),
-            format!(
-                "    ({} with append mode)",
-                model_alias(tools, "workspace.commit")
-            ),
-            String::new(),
-        ]);
-    }
-    lines.push("Anyway: TOOLS&SKILLS IS ALL YOU NEED".to_string());
+    lines.push("Use tools for concrete information gaps or required effects, not a fixed checklist. Reuse known file paths and completed task results. Group independent reads and use one ordered edits batch for changes to the same file. Combined options still consume the underlying tools' per-tool and invocation budgets. Confirm tool results before publishing or ending; failed operations are not completed work.".to_string());
 
     lines.join("\n")
 }
