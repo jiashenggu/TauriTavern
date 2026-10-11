@@ -47,6 +47,101 @@ pub(super) struct PersistentStateManifest {
 }
 
 impl FileAgentRepository {
+    pub(super) async fn persistent_file(
+        &self,
+        workspace_id: &str,
+        state_id: &str,
+        path: &tt_domain::models::agent::WorkspacePath,
+    ) -> Result<tt_ports::repositories::workspace_repository::WorkspaceFile, DomainError> {
+        let dir = self.persistent_state_dir(workspace_id, state_id)?;
+        let manifest = self.read_persistent_state_manifest(&dir, state_id).await?;
+        let entry = manifest
+            .files
+            .iter()
+            .find(|file| file.path == path.as_str())
+            .ok_or_else(|| {
+                DomainError::NotFound(format!("agent.state_file_missing: {}", path.as_str()))
+            })?;
+        let file = read_snapshot_file(&dir, path).await?;
+        if file.sha256 != entry.sha256 || file.bytes != entry.bytes {
+            return Err(DomainError::Conflict(
+                "agent.state_file_changed: published file does not match its manifest".into(),
+            ));
+        }
+        Ok(file)
+    }
+
+    pub(super) async fn fork_state_file(
+        &self,
+        workspace_id: &str,
+        state_id: &str,
+        file: &tt_ports::repositories::workspace_repository::WorkspaceFile,
+        expected_sha256: &str,
+    ) -> Result<String, DomainError> {
+        let _guard = self.persist_lock.lock().await;
+        if file.path.as_str() != "persist/state.json" {
+            return Err(DomainError::InvalidData("agent.state_path_invalid".into()));
+        }
+        let source = self.persistent_state_dir(workspace_id, state_id)?;
+        let current = self
+            .persistent_file(workspace_id, state_id, &file.path)
+            .await?;
+        if current.sha256 != expected_sha256 {
+            return Err(DomainError::Conflict(
+                "agent.state_conflict: state changed; reload before saving".into(),
+            ));
+        }
+        let mut manifest = self
+            .read_persistent_state_manifest(&source, state_id)
+            .await?;
+        let new_id = Uuid::new_v4().to_string();
+        let target = self.persistent_state_dir(workspace_id, &new_id)?;
+        let temporary = source
+            .parent()
+            .expect("state parent")
+            .join(format!(".{new_id}.tmp"));
+        fs::create_dir(&temporary).await.map_err(state_io)?;
+        let result = async {
+            copy_directory_contents(&source, &temporary).await?;
+            for entry in &manifest.files {
+                let path = tt_domain::models::agent::WorkspacePath::parse(&entry.path)?;
+                let copied = read_snapshot_file(&temporary, &path).await?;
+                if copied.sha256 != entry.sha256 || copied.bytes != entry.bytes {
+                    return Err(DomainError::Conflict("agent.state_copy_changed".into()));
+                }
+            }
+            let path = temporary.join(file.path.as_str());
+            let text: serde_json::Value = tt_domain::json_input::from_str(&file.text)
+                .map_err(|error| DomainError::InvalidData(error.to_string()))?;
+            Self::write_json_atomic(&path, &text).await?;
+            let saved = read_snapshot_file(&temporary, &file.path).await?;
+            manifest.state_id = new_id.clone();
+            manifest.base_state_id = Some(state_id.to_owned());
+            manifest.created_at = Utc::now();
+            manifest.changes = vec![WorkspacePersistentChange {
+                path: file.path.as_str().to_owned(),
+                kind: WorkspacePersistentChangeKind::Modified,
+                sha256: saved.sha256.clone(),
+                bytes: saved.bytes,
+            }];
+            let entry = manifest
+                .files
+                .iter_mut()
+                .find(|entry| entry.path == file.path.as_str())
+                .expect("source entry");
+            entry.sha256 = saved.sha256;
+            entry.bytes = saved.bytes;
+            Self::write_json_atomic(&temporary.join("manifest.json"), &manifest).await?;
+            fs::rename(&temporary, &target).await.map_err(state_io)?;
+            Ok(new_id)
+        }
+        .await;
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&temporary).await;
+        }
+        result
+    }
+
     pub(super) async fn initialize_projected_roots(
         &self,
         run: &AgentRun,
@@ -337,6 +432,36 @@ impl FileAgentRepository {
         }
         Ok(manifest)
     }
+}
+
+fn state_io(error: impl std::fmt::Display) -> DomainError {
+    DomainError::InternalError(format!("agent.state_storage_failed: {error}"))
+}
+
+async fn read_snapshot_file(
+    root: &Path,
+    path: &tt_domain::models::agent::WorkspacePath,
+) -> Result<tt_ports::repositories::workspace_repository::WorkspaceFile, DomainError> {
+    let mut target = root.to_path_buf();
+    for part in path.as_str().split('/') {
+        target.push(part);
+        let metadata = fs::symlink_metadata(&target).await.map_err(state_io)?;
+        if metadata.file_type().is_symlink() {
+            return Err(DomainError::InvalidData(
+                "agent.state_symlink_denied".into(),
+            ));
+        }
+        if path.as_str() == "persist/state.json"
+            && metadata.is_file()
+            && metadata.len() > 8 * 1024 * 1024
+        {
+            return Err(DomainError::InvalidData(
+                "agent.state_invalid: state exceeds 8 MiB".into(),
+            ));
+        }
+    }
+    let text = fs::read_to_string(target).await.map_err(state_io)?;
+    Ok(super::fs_tree::workspace_file_from_text(path.clone(), text))
 }
 
 pub(super) fn persistent_roots(manifest: &WorkspaceManifest) -> Result<Vec<String>, DomainError> {

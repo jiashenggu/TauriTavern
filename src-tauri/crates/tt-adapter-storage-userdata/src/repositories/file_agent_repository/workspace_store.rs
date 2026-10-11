@@ -18,6 +18,26 @@ use tt_ports::repositories::workspace_repository::{
 
 #[async_trait]
 impl WorkspaceRepository for FileAgentRepository {
+    async fn read_persistent_file(
+        &self,
+        workspace_id: &str,
+        state_id: &str,
+        path: &WorkspacePath,
+    ) -> Result<WorkspaceFile, DomainError> {
+        self.persistent_file(workspace_id, state_id, path).await
+    }
+
+    async fn fork_persistent_file(
+        &self,
+        workspace_id: &str,
+        state_id: &str,
+        file: &WorkspaceFile,
+        expected_sha256: &str,
+    ) -> Result<String, DomainError> {
+        self.fork_state_file(workspace_id, state_id, file, expected_sha256)
+            .await
+    }
+
     async fn validate_persistent_state(
         &self,
         workspace_id: &str,

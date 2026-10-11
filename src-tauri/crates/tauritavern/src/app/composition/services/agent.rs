@@ -56,6 +56,7 @@ pub(super) fn build(
         repositories.agent_invocation_repository.clone(),
         repositories.workspace_repository.clone(),
         repositories.chat_repository.clone(),
+        repositories.chat_payload_commit_repository.clone(),
         repositories.group_chat_repository.clone(),
         skill_service,
         Arc::new(ChatCompletionAgentModelGateway::new(

@@ -37,7 +37,7 @@ impl AgentRuntimeService {
         })
     }
 
-    async fn find_last_chat_message(
+    pub(super) async fn find_last_chat_message(
         &self,
         chat_ref: &AgentChatRef,
     ) -> Result<Option<LocatedChatMessage>, ApplicationError> {

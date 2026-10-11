@@ -14,6 +14,7 @@ import { confirmEmptyAgentPersist } from '../adapters/st/agent-empty-persist-pop
 import { DEFAULT_AGENT_PROFILE_ID } from '../../../scripts/tauritavern/agent/agent-system-settings.js';
 import { ensureModelTargetLlmConnectionForProfile } from '../../../scripts/tauritavern/agent/model-target-llm-connection.js';
 import { restoreHostPresentation } from './agent-chat-presentation-checkpoint.js';
+import { createAgentStateApi } from './agent-state.js';
 
 /**
  * @typedef {{ kind: 'character'; characterId: string; fileName: string }} CharacterChatRef
@@ -30,12 +31,14 @@ export function createAgentApi({ safeInvoke, loadScript = () => import('../../..
     const runtime = createAgentRunRuntimeApi({ safeInvoke });
     const subscribeLiveProjection = createAgentRunLiveSubscribe({ safeInvoke });
     const commitBridges = new Map();
+    const state = createAgentStateApi({ safeInvoke, loadScript });
 
     async function startRunWithPromptSnapshot(input) {
         return startRunWithPromptSnapshotInternal(input, { ensureModelTargetConnection: true });
     }
 
     async function startRunWithPromptSnapshotInternal(input, { ensureModelTargetConnection, runProfile = null } = {}) {
+        state.assertIdle();
         const dto = await normalizePromptSnapshotRunInput(input, {
             safeInvoke,
             ensureModelTargetConnection,
@@ -102,6 +105,7 @@ export function createAgentApi({ safeInvoke, loadScript = () => import('../../..
     }
 
     async function resume({ runId, additionalRounds = 0, checkpoint = null, revisionGuidance = null } = {}) {
+        state.assertIdle();
         runId = String(runId || '').trim();
         if (!Number.isInteger(additionalRounds) || additionalRounds < 0) {
             throw new Error('agent.resume_rounds_invalid: additionalRounds must be a non-negative integer');
@@ -201,6 +205,7 @@ export function createAgentApi({ safeInvoke, loadScript = () => import('../../..
         subscribeLiveProjection,
         settleChatPresentation,
         profiles,
+        state,
         tools: {
             list: listTools,
         },

@@ -78,6 +78,20 @@ const { events, timelineProjection } = await agent.readEvents({
 
 模型回合、任务详情、工具目录与 Timeline 关系属于随项目演进的 UI 投影（Project Contract）。界面通过这些 API 读取内容，具体类型集中在 `src/types.d.ts`。日志语义见 [运行日志](../Agent/RunEventJournal.md)。
 
+## 手动状态面板
+
+聊天界面的「Agent 状态」悬浮按钮读取当前聊天最近一条 Agent 回复的当前 swipe 所引用的 `persist/state.json`，不是运行工作副本。分区字段视图支持修改已有值，高级 JSON 视图支持结构调整；字段名称随状态文档保留，未知字段不丢弃。状态须为 JSON 对象，最大8 MiB，字段视图最多4096个末端字段，字段路径最多4096字节；一次字段修改的 JSON 值合计不超过8 MiB。`schemaVersion` 不由面板迁移；已有 `revision` 在成功保存时自动递增。保存前显示修改确认，关闭窗口保留草稿，切换聊天、swipe 或 Run 清空旧草稿。
+
+| 方法 | 行为 |
+| --- | --- |
+| `state.readCurrent()` | 返回 `{ target, document }`；document 含已发布版本 ID、文件 SHA、聊天 SHA、JSON 原文、末端字段与只读标志 |
+| `state.save({ target, expectedStateId, expectedSha256, expectedChatSha256, text?, edits? })` | `text` 与 `edits` 二选一；每个字段修改为 `{ pointer, kind, valueJson }`，数值通过 JSON 文本传递，不经 JavaScript Number 舍入 |
+| `state.isSaving()` / `state.needsReload()` | 查询保存门禁及无法确认保存结果时的重载要求 |
+
+保存不调用模型、不改聊天正文。后端校验聊天身份、消息、当前 swipe、状态版本及 SHA，拒绝活跃 Run 的写入。先复制完整持久版本，只修改 state.json，再以整份聊天 SHA 为条件原子替换目标消息的 metadata，同时同步当前 swipe 的 metadata；其他消息、其他 swipe 和旧持久版本不改。状态文件和聊天文件不是跨文件原子事务：聊天更新失败时，新版本可能成为未引用版本，但旧引用仍有效。宿主复用聊天保存队列，避免普通保存覆盖新引用；保存回执丢失时按本次 editId 查询，不重放修改。结果仍无法确认时禁止继续生成及聊天保存，要求重载应用。
+
+普通后续生成继承新状态版本；对该回复执行 `/fix` 时，运行器将其当前已发布人工状态带回修订工作副本，并要求模型以人工更正为准。只读 baseline 仍保留原始起点。运行历史被清理后，只要聊天仍引用有效持久版本，状态面板仍可读取；没有 Agent 状态或状态尚未发布时明确报错，不制造空状态。
+
 ## Profile、提示词与工具目录
 
 | 方法 | 用途 |

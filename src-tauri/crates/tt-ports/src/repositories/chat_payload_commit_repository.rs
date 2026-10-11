@@ -57,9 +57,37 @@ pub struct CommittedChatPayload {
     pub size: u64,
 }
 
+pub struct ChatMessageSnapshot {
+    pub message: Value,
+    pub chat_metadata: Value,
+    pub chat_sha256: String,
+}
+
 /// Atomically publishes full chat payloads or metadata-only updates.
 #[async_trait]
 pub trait ChatPayloadCommitRepository: Send + Sync {
+    async fn read_message_snapshot(
+        &self,
+        _target: ChatPayloadTarget,
+        _index: usize,
+    ) -> Result<ChatMessageSnapshot, DomainError> {
+        Err(DomainError::InvalidData(
+            "chat.message_edit_unsupported".into(),
+        ))
+    }
+
+    async fn replace_message_guarded(
+        &self,
+        _target: ChatPayloadTarget,
+        _index: usize,
+        _expected_chat_sha256: &str,
+        _message: Value,
+    ) -> Result<(), DomainError> {
+        Err(DomainError::InvalidData(
+            "chat.message_edit_unsupported".into(),
+        ))
+    }
+
     async fn open_swipe_source(
         &self,
         target: ChatPayloadTarget,

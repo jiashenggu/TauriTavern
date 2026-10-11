@@ -635,7 +635,52 @@ type TauriTavernAgentRetentionApi = {
     }) => Promise<TauriTavernAgentRunPruneApplyResult>;
 };
 
+type TauriTavernAgentStateTarget = {
+    chatRef: TauriTavernChatRef;
+    stableChatId: string;
+    messageIndex: number;
+    swipeId: number | null;
+};
+
+type TauriTavernAgentStateField = {
+    pointer: string;
+    kind: string;
+    valueJson: string;
+};
+
+type TauriTavernAgentStateDocument = {
+    stateId: string;
+    sha256: string;
+    chatSha256: string;
+    text: string;
+    fields: TauriTavernAgentStateField[];
+    manualEdit?: Record<string, unknown> | null;
+    readOnly: boolean;
+};
+
+type TauriTavernAgentStateSelection = {
+    target: TauriTavernAgentStateTarget;
+    document: TauriTavernAgentStateDocument;
+};
+
+type TauriTavernAgentStateSave = {
+    target: TauriTavernAgentStateTarget;
+    expectedStateId: string;
+    expectedSha256: string;
+    expectedChatSha256: string;
+    text?: string;
+    edits?: TauriTavernAgentStateField[];
+};
+
+type TauriTavernAgentStateApi = {
+    readCurrent: () => Promise<TauriTavernAgentStateSelection>;
+    save: (input: TauriTavernAgentStateSave) => Promise<{ stateId: string; agentMetadata: Record<string, unknown> }>;
+    isSaving: () => boolean;
+    needsReload: () => boolean;
+};
+
 type TauriTavernAgentApi = {
+    state: TauriTavernAgentStateApi;
     readCheckpoint: (runId: string) => Promise<TauriTavernAgentRunCheckpoint>;
     resume: (input: { runId: string; additionalRounds?: number; checkpoint?: TauriTavernAgentRunCheckpoint; revisionGuidance?: string }) => Promise<TauriTavernAgentRunHandle>;
     startRunWithPromptSnapshot: (input: {

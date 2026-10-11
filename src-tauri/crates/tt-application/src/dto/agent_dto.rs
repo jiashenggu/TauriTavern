@@ -16,6 +16,54 @@ use tt_ports::repositories::agent_profile_storage_health_repository::{
     AgentProfileStorageIssue, AgentProfileStorageRepairAction,
 };
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentStateTargetDto {
+    pub chat_ref: AgentChatRef,
+    pub stable_chat_id: String,
+    pub message_index: usize,
+    pub swipe_id: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentStateFieldDto {
+    pub pointer: String,
+    pub kind: String,
+    pub value_json: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStateDocumentDto {
+    pub state_id: String,
+    pub sha256: String,
+    pub chat_sha256: String,
+    pub text: String,
+    pub fields: Vec<AgentStateFieldDto>,
+    pub manual_edit: Option<Value>,
+    pub read_only: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentSaveStateDto {
+    pub edit_id: String,
+    pub target: AgentStateTargetDto,
+    pub expected_state_id: String,
+    pub expected_sha256: String,
+    pub expected_chat_sha256: String,
+    pub text: Option<String>,
+    pub edits: Option<Vec<AgentStateFieldDto>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSaveStateResultDto {
+    pub state_id: String,
+    pub agent_metadata: Value,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentStartRunDto {

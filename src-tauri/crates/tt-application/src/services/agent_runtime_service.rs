@@ -47,7 +47,6 @@ mod executor;
 mod finalization;
 mod guidance;
 mod input_context;
-mod workspace_context;
 mod invocation;
 mod journal;
 mod lifecycle;
@@ -62,10 +61,12 @@ mod prompt_snapshot;
 mod revision;
 mod scheduler;
 mod skill_scope;
+mod state_editor;
 mod task_details;
 mod timeline_projection;
 mod tool_execution;
 mod tool_snapshot;
+mod workspace_context;
 
 #[cfg(test)]
 mod tests;
@@ -131,6 +132,9 @@ pub struct AgentRuntimeService {
     invocation_repository: Arc<dyn AgentInvocationRepository>,
     workspace_repository: Arc<dyn WorkspaceRepository>,
     chat_repository: Arc<dyn ChatRepository>,
+    chat_commit_repository: Arc<
+        dyn tt_ports::repositories::chat_payload_commit_repository::ChatPayloadCommitRepository,
+    >,
     group_chat_repository: Arc<dyn GroupChatRepository>,
     model_gateway: Arc<dyn AgentModelGateway>,
     profile_service: Arc<AgentProfileService>,
@@ -158,6 +162,9 @@ impl AgentRuntimeService {
         invocation_repository: Arc<dyn AgentInvocationRepository>,
         workspace_repository: Arc<dyn WorkspaceRepository>,
         chat_repository: Arc<dyn ChatRepository>,
+        chat_commit_repository: Arc<
+            dyn tt_ports::repositories::chat_payload_commit_repository::ChatPayloadCommitRepository,
+        >,
         group_chat_repository: Arc<dyn GroupChatRepository>,
         skill_service: Arc<SkillService>,
         model_gateway: Arc<dyn AgentModelGateway>,
@@ -181,6 +188,7 @@ impl AgentRuntimeService {
             invocation_repository,
             workspace_repository,
             chat_repository,
+            chat_commit_repository,
             group_chat_repository,
             model_gateway,
             profile_service,

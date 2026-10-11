@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { reportAgentSystemError, requireAgentApi, waitForHostReady } from './host-api';
 import { translateAgentSystem as tr } from './i18n';
 import { mountChatInputAgentToggle } from './chat-input-toggle';
+import { mountAgentStatePanel } from './agent-state-panel';
 import { mountEmbeddedAssetButtons } from './embedded-assets-buttons';
 import { mountAgentRunTimelinePanel } from './run-timeline-panel';
 import { mountSkillManagerSettingsPanel } from './skill-manager/settings-entry';
@@ -54,6 +55,7 @@ async function mountAgentSystem(): Promise<void> {
     });
     mountSkillManagerSettingsPanel();
     mountEmbeddedAssetButtons();
+    mountAgentStatePanel();
     await Promise.all([
         entryInitialization,
         mountChatInputAgentToggle(),

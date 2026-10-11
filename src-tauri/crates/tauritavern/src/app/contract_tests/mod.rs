@@ -236,6 +236,7 @@ fn agent_runtime_fixture_with_results(
         agent_repository.clone() as Arc<dyn AgentInvocationRepository>,
         agent_repository.clone() as Arc<dyn WorkspaceRepository>,
         chat_file_repository.clone() as Arc<dyn ChatRepository>,
+        chat_file_repository.clone(),
         chat_file_repository.clone() as Arc<dyn GroupChatRepository>,
         skill_service,
         model_gateway.clone(),

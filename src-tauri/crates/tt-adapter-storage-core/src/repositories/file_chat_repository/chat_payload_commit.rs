@@ -145,6 +145,28 @@ impl FileChatRepository {
 
 #[async_trait]
 impl ChatPayloadCommitRepository for FileChatRepository {
+    async fn read_message_snapshot(
+        &self,
+        target: ChatPayloadTarget,
+        index: usize,
+    ) -> Result<
+        tt_ports::repositories::chat_payload_commit_repository::ChatMessageSnapshot,
+        DomainError,
+    > {
+        self.message_snapshot(target, index).await
+    }
+
+    async fn replace_message_guarded(
+        &self,
+        target: ChatPayloadTarget,
+        index: usize,
+        expected_chat_sha256: &str,
+        message: Value,
+    ) -> Result<(), DomainError> {
+        self.edit_message(target, index, expected_chat_sha256.to_owned(), message)
+            .await
+    }
+
     async fn open_swipe_source(
         &self,
         target: ChatPayloadTarget,

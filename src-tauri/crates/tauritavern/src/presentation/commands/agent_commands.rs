@@ -35,6 +35,34 @@ use tt_domain::models::agent::profile_diagnostic::AgentProfileHealth;
 use tt_ports::repositories::agent_workspace_lifecycle_repository::AgentPersistentStatePruneRequest;
 
 #[tauri::command]
+pub async fn read_agent_state_document(
+    dto: tt_application::dto::agent_dto::AgentStateTargetDto,
+    app_state: State<'_, Arc<AppState>>,
+) -> Result<tt_application::dto::agent_dto::AgentStateDocumentDto, CommandError> {
+    log_command("read_agent_state_document");
+    app_state
+        .services
+        .agent_runtime_service
+        .read_state_document(dto)
+        .await
+        .map_err(map_command_error("Failed to read Agent state"))
+}
+
+#[tauri::command]
+pub async fn save_agent_state_document(
+    dto: tt_application::dto::agent_dto::AgentSaveStateDto,
+    app_state: State<'_, Arc<AppState>>,
+) -> Result<tt_application::dto::agent_dto::AgentSaveStateResultDto, CommandError> {
+    log_command("save_agent_state_document");
+    app_state
+        .services
+        .agent_runtime_service
+        .save_state_document(dto)
+        .await
+        .map_err(map_command_error("Failed to save Agent state"))
+}
+
+#[tauri::command]
 pub async fn start_agent_run(
     dto: AgentStartRunDto,
     app_state: State<'_, Arc<AppState>>,

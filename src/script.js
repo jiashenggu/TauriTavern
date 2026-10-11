@@ -651,6 +651,9 @@ export function enqueueChatSave(task) {
         .catch(() => {})
         .then(async () => {
             try {
+                if (window.__TAURITAVERN__?.api?.agent?.state?.needsReload()) {
+                    throw new Error('agent.state_save_unknown: reload the application before saving chat');
+                }
                 return await task();
             } finally {
                 pendingChatSaveTasks -= 1;
@@ -5336,6 +5339,10 @@ async function exitGeneration() {
  * @returns {Promise<any>} Returns a promise that resolves when the text is done generating.
  */
 export async function Generate(type, options = {}, dryRun = false) {
+    if (window.__TAURITAVERN__?.api?.agent?.state?.isSaving()) {
+        cleanupGenerationAfterUnhandledError(type, dryRun);
+        throw new Error('agent.state_saving: wait for the state save to finish');
+    }
     await enterGeneration(dryRun);
     try {
         return await GenerateInternal(type, options, dryRun);

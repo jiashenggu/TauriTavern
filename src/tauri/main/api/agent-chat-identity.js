@@ -24,7 +24,7 @@ export async function assertCurrentChat(expectedRef, expectedStableChatId = null
     throw new Error('agent.commit_chat_mismatch: active chat changed before commit');
 }
 
-function sameChatRef(a, b) {
+export function sameChatRef(a, b) {
     if (!a || !b || a.kind !== b.kind) return false;
     if (a.kind === 'character') {
         return String(a.characterId || '') === String(b.characterId || '')

@@ -217,7 +217,25 @@ impl AgentRuntimeService {
                     &revision.previous_output,
                 )
                 .await?;
+            let manual_state = self
+                .adopt_manual_state_for_revision(&checkpoint.run, &dto.chat_ref)
+                .await?;
             checkpoint.state.begin_output_revision()?;
+            if let Some(state_id) = manual_state {
+                checkpoint.state.previous_published_state_id = Some(state_id);
+                let frame = checkpoint
+                    .state
+                    .foreground
+                    .as_mut()
+                    .expect("revision frame");
+                frame.prepared.request.messages.push(tt_domain::models::agent::AgentModelMessage {
+                    role: tt_domain::models::agent::AgentModelRole::User,
+                    parts: vec![tt_domain::models::agent::AgentModelContentPart::Text {
+                        text: "The user manually edited the selected reply's persistent state. persist/state.json now contains that published version. Read its current contents (or the initial file view) before state work; earlier transcript state is not authoritative. Preserve the user's corrections unless explicitly asked to change them.".into(),
+                    }],
+                    provider_metadata: Value::Null,
+                });
+            }
         }
         // Rehydrate shared frozen context once. The workspace and invocation snapshots
         // remain the originals; no profile resolution or prompt assembly occurs here.

@@ -50,6 +50,29 @@ pub enum WorkspaceWriteGuard {
 
 #[async_trait]
 pub trait WorkspaceRepository: Send + Sync {
+    async fn read_persistent_file(
+        &self,
+        _workspace_id: &str,
+        _state_id: &str,
+        _path: &WorkspacePath,
+    ) -> Result<WorkspaceFile, DomainError> {
+        Err(DomainError::InvalidData(
+            "agent.state_edit_unsupported".into(),
+        ))
+    }
+
+    async fn fork_persistent_file(
+        &self,
+        _workspace_id: &str,
+        _state_id: &str,
+        _file: &WorkspaceFile,
+        _expected_sha256: &str,
+    ) -> Result<String, DomainError> {
+        Err(DomainError::InvalidData(
+            "agent.state_edit_unsupported".into(),
+        ))
+    }
+
     /// Check the inherited version before creating a run or its workspace.
     async fn validate_persistent_state(
         &self,
