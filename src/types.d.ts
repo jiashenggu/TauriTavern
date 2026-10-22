@@ -461,6 +461,7 @@ type TauriTavernAgentProfileDefinition = {
         includeActivatedWorldInfo: boolean;
         initialWorkspaceFiles?: string[];
         initialBaselineFiles?: string[];
+        eventArchive?: { maxRecentEvents: number; keepRecentEvents: number };
     };
     delegation: {
         canDelegate: boolean;

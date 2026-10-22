@@ -7,6 +7,7 @@ use serde_json::{Map, Value};
 use crate::errors::DomainError;
 use crate::models::tool::{ToolChoice, ToolId, ToolInvocation};
 
+pub mod event_archive;
 pub mod plan;
 pub mod profile;
 pub mod profile_diagnostic;
@@ -379,6 +380,15 @@ impl WorkspacePath {
                     let segment = value.to_string_lossy();
                     if segment.is_empty() {
                         continue;
+                    }
+                    // Win32 strips trailing dots/spaces and interprets ':' as
+                    // an alternate stream. Reject these on every platform so
+                    // policy checks and filesystem IO identify the same file.
+                    if segment.ends_with(['.', ' ']) || segment.contains(':') {
+                        return Err(DomainError::InvalidData(
+                            "Workspace path components cannot end in a dot or space or contain ':'"
+                                .to_string(),
+                        ));
                     }
                     parts.push(segment.to_string());
                 }

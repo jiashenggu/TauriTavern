@@ -38,6 +38,8 @@ Preset 提供提示词布局和生成设置。Profile 的 model binding 提供�
 
 独立组装使用 headless PromptManager，不切换 UI 的预设或模型。动态扩展提示词在输入冻结时收集；依赖普通 `CHAT_COMPLETION_PROMPT_READY` 事件改写提示词的扩展不会参与这条独立组装路径。
 
+独立预设的`openai_max_context`、`openai_max_tokens`等预算参数也取自该预设。字段缺失时，前端使用默认值（当前为4095上下文、300输出），不会继承界面上另一个活动预设的预算。只包含提示词与正则的可移植预设用于独立引用时，需要在本机运行副本中补齐适当预算，并保留用户已有的参数选择；源发布文件仍可保持可移植。遇到`TokenBudgetExceeded: worldInfoBefore`时先核对实际引用文件的预算，不直接删减已启用的世界书。
+
 ## 源码
 
 | 位置 | 职责 |

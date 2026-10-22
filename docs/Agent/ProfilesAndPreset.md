@@ -64,6 +64,7 @@ Profile 面板中的 Model Target 会物化为 LLM Connection。连接的端点�
 | `context.includeActivatedWorldInfo` | 是否在初始提示词中包含已激活世界书 |
 | `context.initialWorkspaceFiles` | 可选的开场文件路径列表，最多8个；默认空列表，不自动注入文件 |
 | `context.initialBaselineFiles` | 可选的持久基准文件列表，最多8个可见 persist/ 文件；默认关闭，在 Run 初始化时保存到只读 baseline/ |
+| `context.eventArchive` | 可选的无损事件归档策略 `{ maxRecentEvents, keepRecentEvents }`；省略或 null 时关闭，可在高级 JSON 配置 |
 | `tools.allow` / `deny` | 可用工具，deny 优先 |
 | `tools.maxRounds` / `maxCallsPerRun` / `maxCallsPerTool` | 每个 Invocation 的轮数与调用预算 |
 | `tools.toolDescriptions` | 替换模型看到的工具或参数描述 |
@@ -79,6 +80,24 @@ Profile 面板中的 Model Target 会物化为 LLM Connection。连接的端点�
 工具字段使用稳定 ID，例如 `builtin:workspace.read_file` 或 `mcp/<registration-id>:<tool-name>`。模型看到的调用名称由 runtime 生成，见 [工具](ToolSystem.md)。
 
 `plan/` 可以保存普通计划文件。当前运行器支持的 Profile plan 配置是 `mode: "none"`、空 `nodes`，尚无节点式工作流执行器。
+
+## 无损事件归档
+
+照微主控默认配置 `"eventArchive": { "maxRecentEvents": 32, "keepRecentEvents": 16 }`。策略须满足 `0 < keepRecentEvents < maxRecentEvents <= 4096`；其他 Profile 省略此选项时行为不变。它处理 `persist/state.json` 的 `recentEvents` 与 `archives` 数组，Profile 必须允许读取和写入状态及 `persist/history/`。
+
+启用该策略的 Profile 必须使用说明这两个顶层数组的记忆协议，例如配套「照微·Agent」预设；仅开启 Agent Mode 不会把普通预设转换成 Agent 记忆协议。可以为 Profile 绑定独立的「照微·Agent」预设，避免当前聊天仍选择普通预设时漏掉协议。
+
+状态写入统一使用 `persist/state.json`；启用归档时拒绝该路径的大小写变体，避免 Windows 上同一文件绕过校验，也避免其他平台创建大小写不同的状态副本。追加写入同样不允许，须通过完整替换或补丁更新 JSON。
+
+模型写入 `persist/state.json` 时，无论直接替换、复制还是补丁，运行器都会在实际写入前使用与新 Run 初始化相同的结构校验：状态须为JSON对象，两个字段均为数组；每个近期事件须有非空字符串 `id`（最多512字节），且不能与其他近期事件或托管归档索引中的ID重复。托管索引的ID列表、路径和SHA格式也须有效。所有这些校验均不依赖事件数是否达到归档阈值；失败作为可修正的 `agent.event_archive_invalid` 工具错误返回，保留原文件，模型可在当前 Run 内修正，不等到下一轮才发现。此处检查状态内容，归档文件的实际内容与SHA仍在归档准备阶段核对。未启用归档的 Profile 不受这个特定状态结构约束。
+
+新 Run 在初始化继承工作副本之后、建立只读 baseline 和发出首次模型请求之前检查事件数量。超过阈值时保留原数组末尾的指定数量，前部事件对象完整写入按内容 SHA 命名的历史 JSON，再确认文件内容和 SHA，最后带原状态 SHA 更新状态及索引。全部事件的未知字段和任意精度数值保留；不根据事件编号或剧情日期猜测排序，不做模型摘要，不修改人物、资源、任务等其他字段，也不增加剧情 revision。状态输入、整理后的状态和单批归档各限8 MiB。
+
+已有存档缺少这些数组时，切换预设不会修改旧状态；下一次初始化仍会拒绝该起点。修复需保留原事件及未知字段，通过状态编辑接口建立新持久版本并更新聊天引用，不能用空数组替代尚未迁移的历史，也不直接覆盖旧持久版本。
+
+运行器生成的索引以 `kind: "agent.eventArchive"` 标识，包含路径、SHA、事件数量、完整 ID 列表、参与者和 `firstListedTime` / `lastListedTime`；时间仅对应原数组中的位置，不宣称是排序后的时间范围。触发下一次归档时会核对已托管索引与文件的 SHA、格式及 ID，缺失、损坏、重复 ID 或路径冲突会停止初始化，不猜测合并或覆盖。其他已有索引保留原样。归档文件确认成功之前不会缩短状态；状态冲突时至多留下未引用的工作文件，不修改旧版本。
+
+`memory_events_archived` 事件记录工作副本整理结果，不等于已发布。新布局与历史文件仍经正常持久版本提交一并发布，原版本及其他分支不改。baseline 冻结整理后的运行起点；恢复和 `/fix` 不重复启动归档，也不把归档当成新一轮结算。关闭选项不会删除已存在的归档，亦不会自动把旧事件搬回常驻状态。这优化常驻输入，不保证磁盘占用或每轮耗时同比减少。
 
 ## 配置协作
 

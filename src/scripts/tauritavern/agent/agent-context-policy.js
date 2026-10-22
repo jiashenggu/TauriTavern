@@ -24,6 +24,16 @@ export function normalizeAgentContextPolicy(value = {}) {
         }
         if (paths.length) filePolicies[key] = paths;
     }
+    const archive = source.eventArchive;
+    if (archive != null) {
+        if (typeof archive !== 'object' || Array.isArray(archive)
+            || Object.keys(archive).some(key => !['maxRecentEvents', 'keepRecentEvents'].includes(key))
+            || !Number.isInteger(archive.maxRecentEvents) || !Number.isInteger(archive.keepRecentEvents)
+            || archive.keepRecentEvents <= 0 || archive.keepRecentEvents >= archive.maxRecentEvents || archive.maxRecentEvents > 4096) {
+            throw new Error('agent.event_archive_invalid: require 0 < keepRecentEvents < maxRecentEvents <= 4096');
+        }
+        filePolicies.eventArchive = { maxRecentEvents: archive.maxRecentEvents, keepRecentEvents: archive.keepRecentEvents };
+    }
     return {
         initialChatHistoryMessages: initialChatHistoryMessages < 0 ? -1 : initialChatHistoryMessages,
         includeActivatedWorldInfo: source.includeActivatedWorldInfo !== false,

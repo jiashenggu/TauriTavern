@@ -80,6 +80,7 @@ fn context_policy_normalizes_negative_history_window_to_full_history() {
         include_activated_world_info: true,
         initial_workspace_files: Vec::new(),
         initial_baseline_files: Vec::new(),
+        event_archive: None,
     };
 
     super::validation::normalize_context_policy(&mut policy).expect("negative values normalize");

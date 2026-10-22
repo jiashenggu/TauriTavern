@@ -206,6 +206,8 @@ pub struct AgentContextPolicy {
     pub initial_workspace_files: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub initial_baseline_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_archive: Option<super::event_archive::EventArchivePolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -410,6 +412,7 @@ impl Default for AgentContextPolicy {
             include_activated_world_info: true,
             initial_workspace_files: Vec::new(),
             initial_baseline_files: Vec::new(),
+            event_archive: None,
         }
     }
 }

@@ -17,6 +17,8 @@
 
 模型用 `workspace.list_files`、`search_files`、`read_file` 寻找和读取材料，用 `write_file`、`apply_patch` 修改文件。路径相对于工作区，例如 `output/main.md`。替换已有文件和应用补丁时，工具使用读取记录和内容 SHA 检查冲突；发生冲突后重新读取，再决定如何修改。
 
+工作区路径的每个组成部分均禁止以点或空格结尾，也禁止包含冒号；所有平台统一在路径解析阶段拒绝，不自动修剪或转换。这样可以阻止 Windows 尾点／尾空格别名和 NTFS 数据流绕过文件权限、状态校验及追加限制。
+
 `write_file` 必须在 `content` 与 `source_path` 中二选一。`source_path` 从本次 Invocation 已完整读取或创建、且 SHA 未变化的可见文件复制文本；目标仍须可写，覆盖已有目标仍检查其读取记录与 SHA。`create_only: true` 使用仓储的原子“不存在”写入条件，即使已经读过目标也不能覆盖它。复制和只新建均只支持 `replace` 模式。
 
 ```json

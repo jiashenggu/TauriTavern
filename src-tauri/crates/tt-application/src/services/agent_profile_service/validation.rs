@@ -144,6 +144,9 @@ pub(super) fn normalize_context_policy(
     if policy.initial_chat_history_messages < 0 {
         policy.initial_chat_history_messages = -1;
     }
+    if let Some(archive) = &policy.event_archive {
+        archive.validate()?;
+    }
     for files in [
         &mut policy.initial_workspace_files,
         &mut policy.initial_baseline_files,

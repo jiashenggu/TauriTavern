@@ -23,6 +23,30 @@ impl<'a> InvocationWorkspaceRepository<'a> {
     ) -> Self {
         Self { inner, profile }
     }
+
+    fn is_event_archive_state(&self, path: &WorkspacePath) -> Result<bool, DomainError> {
+        const STATE_PATH: &str = "persist/state.json";
+        if self.profile.context.event_archive.is_none()
+            || !path.as_str().eq_ignore_ascii_case(STATE_PATH)
+        {
+            return Ok(false);
+        }
+        // Reserve one spelling on every platform: case variants can overwrite
+        // the same file on Windows and create divergent state files on Linux.
+        if path.as_str() != STATE_PATH {
+            return Err(DomainError::InvalidData(format!(
+                "agent.event_archive_invalid: use the canonical state path `{STATE_PATH}`"
+            )));
+        }
+        Ok(true)
+    }
+
+    fn validate_state_write(&self, path: &WorkspacePath, text: &str) -> Result<(), DomainError> {
+        if self.is_event_archive_state(path)? {
+            tt_domain::models::agent::event_archive::validate_event_archive_state(text)?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -85,6 +109,7 @@ impl WorkspaceRepository for InvocationWorkspaceRepository<'_> {
         path: &WorkspacePath,
         text: &str,
     ) -> Result<WorkspaceFile, DomainError> {
+        self.validate_state_write(path, text)?;
         self.inner.write_text(run_id, path, text).await
     }
 
@@ -95,6 +120,7 @@ impl WorkspaceRepository for InvocationWorkspaceRepository<'_> {
         text: &str,
         guard: WorkspaceWriteGuard,
     ) -> Result<WorkspaceFile, DomainError> {
+        self.validate_state_write(path, text)?;
         self.inner
             .write_text_guarded(run_id, path, text, guard)
             .await
@@ -106,6 +132,12 @@ impl WorkspaceRepository for InvocationWorkspaceRepository<'_> {
         path: &WorkspacePath,
         text: &str,
     ) -> Result<WorkspaceAppendResult, DomainError> {
+        if self.is_event_archive_state(path)? {
+            return Err(DomainError::InvalidData(
+                "agent.event_archive_invalid: persist/state.json requires a complete JSON replacement; append is not supported"
+                    .into(),
+            ));
+        }
         self.inner.append_text(run_id, path, text).await
     }
 

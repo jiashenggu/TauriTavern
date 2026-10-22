@@ -270,7 +270,13 @@ test('Agent context policy windows latest-first prompt history without mutating 
     ];
 
     const files = ['persist/state.json'];
-    const initialized = contextPolicy.normalizeAgentContextPolicy({ initialWorkspaceFiles: files, initialBaselineFiles: files });
+    const archive = { maxRecentEvents: 32, keepRecentEvents: 16 };
+    const initialized = contextPolicy.normalizeAgentContextPolicy({ initialWorkspaceFiles: files, initialBaselineFiles: files, eventArchive: archive });
+    archive.keepRecentEvents = 31;
+    assert.deepEqual(initialized.eventArchive, { maxRecentEvents: 32, keepRecentEvents: 16 });
+    for (const eventArchive of [{ maxRecentEvents: 32, keepRecentEvents: 0 }, { maxRecentEvents: 16, keepRecentEvents: 16 }, { maxRecentEvents: 4097, keepRecentEvents: 16 }, { maxRecentEvents: '32', keepRecentEvents: 16 }]) {
+        assert.throws(() => contextPolicy.normalizeAgentContextPolicy({ eventArchive }), /event_archive_invalid/);
+    }
     files.push('scratch/later.json');
     assert.deepEqual(initialized.initialWorkspaceFiles, ['persist/state.json']);
     assert.deepEqual(initialized.initialBaselineFiles, ['persist/state.json']);

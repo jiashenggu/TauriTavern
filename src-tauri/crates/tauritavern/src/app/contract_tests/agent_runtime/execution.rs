@@ -592,7 +592,7 @@ async fn zhaowei_writer_returns_readable_artifact_without_publishing_or_mutating
                 model_tool_call(
                     "parent_memory",
                     "workspace_write_file",
-                    json!({ "path": "persist/state.json", "content": "{\"owner\":\"controller\"}" }),
+                    json!({ "path": "persist/state.json", "content": "{\"owner\":\"controller\",\"recentEvents\":[],\"archives\":[]}" }),
                 ),
                 model_tool_call(
                     "parent_context",
@@ -786,7 +786,10 @@ async fn zhaowei_writer_returns_readable_artifact_without_publishing_or_mutating
         "persist/state.json",
     )
     .await;
-    assert_eq!(memory, json!({ "owner": "controller", "phase": "saved" }));
+    assert_eq!(
+        memory,
+        json!({ "owner": "controller", "phase": "saved", "recentEvents": [], "archives": [] })
+    );
     let preview = events
         .iter()
         .find(|event| {
@@ -1154,9 +1157,9 @@ async fn zhaowei_agent_profile_persists_memory_and_isolates_branch_versions() {
     let root = temp_root("zhaowei-agent");
     let body = "<bbs_start>2018年11月1日 07:24</bbs_start><scene_header>商店</scene_header>交易完成。<bbs_end>2018年11月1日 07:25</bbs_end>";
     let states = [
-        json!({ "schemaVersion": 1, "revision": 1, "player": { "balance": 80 }, "recentEvents": [{ "id": "E1", "spent": 20 }] }),
-        json!({ "schemaVersion": 1, "revision": 2, "player": { "balance": 60 }, "recentEvents": [{ "id": "E1", "spent": 20 }, { "id": "E2", "spent": 20 }] }),
-        json!({ "schemaVersion": 1, "revision": 2, "player": { "balance": 70 }, "recentEvents": [{ "id": "E1", "spent": 20 }, { "id": "E2", "spent": 10 }] }),
+        json!({ "schemaVersion": 1, "revision": 1, "player": { "balance": 80 }, "recentEvents": [{ "id": "E1", "spent": 20 }], "archives": [] }),
+        json!({ "schemaVersion": 1, "revision": 2, "player": { "balance": 60 }, "recentEvents": [{ "id": "E1", "spent": 20 }, { "id": "E2", "spent": 20 }], "archives": [] }),
+        json!({ "schemaVersion": 1, "revision": 2, "player": { "balance": 70 }, "recentEvents": [{ "id": "E1", "spent": 20 }, { "id": "E2", "spent": 10 }], "archives": [] }),
     ];
     let mut responses = vec![model_tool_response(vec![
         model_tool_call(
@@ -1190,7 +1193,7 @@ async fn zhaowei_agent_profile_persists_memory_and_isolates_branch_versions() {
             ]));
         }
         let baseline_args = if index == 0 {
-            let baseline = json!({ "schemaVersion": 1, "revision": 0, "player": { "balance": 100 }, "recentEvents": [] });
+            let baseline = json!({ "schemaVersion": 1, "revision": 0, "player": { "balance": 100 }, "recentEvents": [], "archives": [] });
             json!({ "path": "output/turn-base.json", "content": baseline.to_string(), "create_only": true })
         } else {
             json!({ "path": "scratch/verified-base.json", "source_path": "baseline/persist/state.json", "create_only": true })

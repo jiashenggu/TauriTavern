@@ -50,6 +50,7 @@ export type AgentProfileDraft = Omit<AgentProfile, 'run' | 'context' | 'delegati
         includeActivatedWorldInfo: boolean;
         initialWorkspaceFiles?: string[];
         initialBaselineFiles?: string[];
+        eventArchive?: NonNullable<AgentProfile['context']>['eventArchive'];
     };
     delegation: AgentProfileDraftDelegation;
     tools: Omit<AgentProfile['tools'], 'maxRounds' | 'maxCallsPerRun' | 'mcpResultInlineCharLimit'> & {

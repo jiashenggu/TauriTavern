@@ -46,6 +46,13 @@ pub(crate) fn classify_workspace_io_error(
                 "The file `{path}` is not UTF-8 text, so this text reader cannot open it. Choose another text file or continue with the workspace context already available."
             ),
         )),
+        DomainError::InvalidData(message) if message.starts_with("agent.event_archive_invalid:") => {
+            Ok(tool_error(
+                call,
+                "agent.event_archive_invalid",
+                &format!("{message}; no file was written. Preserve existing events when correcting the state structure."),
+            ))
+        }
         other => Err(other),
     }
 }

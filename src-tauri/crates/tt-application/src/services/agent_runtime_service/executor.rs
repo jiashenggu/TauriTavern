@@ -273,7 +273,10 @@ impl AgentRuntimeService {
         self.workspace_repository
             .initialize_run(&run, &manifest, &prompt_snapshot, &resolved_profile)
             .await?;
-        self.initialize_baseline_files(run_id, &resolved_profile).await?;
+        self.archive_initial_events(run_id, &resolved_profile)
+            .await?;
+        self.initialize_baseline_files(run_id, &resolved_profile)
+            .await?;
         self.event(
             run_id,
             AgentRunEventLevel::Info,

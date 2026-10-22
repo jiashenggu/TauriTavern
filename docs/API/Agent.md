@@ -95,6 +95,8 @@ const { events, timelineProjection } = await agent.readEvents({
 
 普通后续生成继承新状态版本；对该回复执行 `/fix` 时，运行器将其当前已发布人工状态带回修订工作副本，并要求模型以人工更正为准。只读 baseline 仍保留原始起点。运行历史被清理后，只要聊天仍引用有效持久版本，状态面板仍可读取；没有 Agent 状态或状态尚未发布时明确报错，不制造空状态。
 
+`archives` 是历史记忆文件的索引，不是聊天备份或全部聊天楼层列表。启用 Profile 的 `context.eventArchive` 后，新 Run 会在工作副本里按阈值自动归档 `recentEvents` 的前部记录；正常提交成功后，新回复的状态面板才显示新索引。旧回复引用的版本不被改写。索引包含文件路径、SHA、完整事件 ID 列表及人物检索信息；实际事件对象完整保存在相应 JSON 文件中。参数配置、恢复与版本边界见 [事件归档](../Agent/ProfilesAndPreset.md#无损事件归档)。
+
 ## Profile、提示词与工具目录
 
 | 方法 | 用途 |

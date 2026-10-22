@@ -20,7 +20,8 @@
     "initialChatHistoryMessages": 6,
     "includeActivatedWorldInfo": true,
     "initialWorkspaceFiles": ["persist/state.json"],
-    "initialBaselineFiles": ["persist/state.json"]
+    "initialBaselineFiles": ["persist/state.json"],
+    "eventArchive": { "maxRecentEvents": 32, "keepRecentEvents": 16 }
   },
   "instructions": {},
   "delegation": {
