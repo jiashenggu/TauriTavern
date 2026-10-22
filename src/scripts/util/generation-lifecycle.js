@@ -19,6 +19,22 @@ export function shouldUnblockGenerationAfterUnhandledError(state) {
 }
 
 /**
+ * A completed request must deliver usable output. Reasoning and token usage are
+ * not a reply; tool turns and image generation can legitimately have no text.
+ *
+ * @param {string} text Newly generated text, without a continuation's existing prefix.
+ * @param {{ images?: string[], hasToolCalls?: boolean }} [options]
+ */
+export function assertGenerationOutput(text, { images = [], hasToolCalls = false } = {}) {
+    if (text?.trim() || images.length || hasToolCalls) {
+        return;
+    }
+    throw Object.assign(new Error('The model finished without returning reply text, images, or tool calls.'), {
+        code: 'generation.empty_output',
+    });
+}
+
+/**
  * Legacy character events describe visible Assistant content. A first-class
  * Assistant that only owns tool calls is published through the tool events.
  *

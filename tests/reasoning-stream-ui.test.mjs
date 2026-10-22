@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
+import { assertGenerationOutput } from '../src/scripts/util/generation-lifecycle.js';
 
 const source = fs.readFileSync(new URL('../src/scripts/reasoning.js', import.meta.url), 'utf8');
 const ast = ts.createSourceFile('reasoning.js', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
@@ -547,6 +548,7 @@ for (const fadeIn of [false, true]) {
         f.power_user.streaming_fps = 30;
         f.handler.state = 'thinking';
         Object.assign(f.context, { AbortController, main_api: 'openai', getStoppingStrings: () => [], console: { warn() {}, error() {} }, unblockGeneration() {},
+            assertGenerationOutput, ToolManager: { hasToolCalls: () => false },
             normalizeStreamingFps: v => v, getStreamingRenderInterval: () => 1000 / 30,
             getPromptCacheUsage: () => null, delay: () => Promise.resolve() });
         vm.runInContext(stopwatch.getText(utilsAst).replace(/^export /, '') + '\n'
@@ -558,7 +560,7 @@ for (const fadeIn of [false, true]) {
         stream.generator = async function* () {
             for (let i = 1; i <= 100; i++) {
                 f.advance(1);
-                yield { text: '', state: { reasoning: 'note '.repeat(i) } };
+                yield { text: i === 100 ? 'Reply after reasoning' : '', state: { reasoning: 'note '.repeat(i) } };
             }
         };
         await stream.generate();

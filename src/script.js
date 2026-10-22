@@ -401,7 +401,7 @@ import { finishStreamingMessageText, renderStreamingMessageText } from './script
 import { initDomHandlers } from './scripts/dom-handlers.js';
 import { SimpleMutex } from './scripts/util/SimpleMutex.js';
 import { createGenerationIdleGate } from './scripts/util/generation-idle-gate.js';
-import { shouldEmitCharacterMessageEvents, shouldUnblockGenerationAfterUnhandledError } from './scripts/util/generation-lifecycle.js';
+import { assertGenerationOutput, shouldEmitCharacterMessageEvents, shouldUnblockGenerationAfterUnhandledError } from './scripts/util/generation-lifecycle.js';
 import { AudioPlayer } from './scripts/audio-player.js';
 import { MacroEnvBuilder } from './scripts/macros/engine/MacroEnvBuilder.js';
 import { MacroEngine } from './scripts/macros/engine/MacroEngine.js';
@@ -4762,7 +4762,7 @@ class StreamingProcessor {
         playMessageSound();
     }
 
-    async onErrorStreaming() {
+    async onErrorStreaming({ emptyOutput = false } = {}) {
         this.abortController.abort();
         this.isStopped = true;
 
@@ -4776,7 +4776,7 @@ class StreamingProcessor {
             console.error('Failed to flush reasoning display', error);
         }
 
-        const emitMessageEvents = !['swipe', 'impersonate', 'continue'].includes(this.type);
+        const emitMessageEvents = !emptyOutput && !['swipe', 'impersonate', 'continue'].includes(this.type);
         if (emitMessageEvents) {
             await eventSource.emit(event_types.MESSAGE_RECEIVED, this.messageId, this.type);
         }
@@ -4861,14 +4861,21 @@ class StreamingProcessor {
                 });
                 await sw.tick(async () => await this.onProgressStreaming(this.messageId, this.continueMessage + text));
             }
+            if (!this.isStopped && !this.abortController.signal.aborted) {
+                assertGenerationOutput(this.result, {
+                    images: this.images,
+                    hasToolCalls: ToolManager.hasToolCalls(this.toolCalls),
+                });
+            }
             const seconds = (timestamps[timestamps.length - 1] - timestamps[0]) / 1000;
             console.warn(`Stream stats: ${timestamps.length} tokens, ${seconds.toFixed(2)} seconds, rate: ${Number(timestamps.length / seconds).toFixed(2)} TPS`);
         } catch (err) {
             // in the case of a self-inflicted abort, we have already cleaned up
             if (!this.isFinished) {
                 console.error(err);
-                await this.onErrorStreaming();
+                await this.onErrorStreaming({ emptyOutput: err?.code === 'generation.empty_output' });
             }
+            if (err?.code === 'generation.empty_output') throw err;
             return this.result;
         }
 
@@ -6646,7 +6653,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         }
     }
 
-    return finishGenerating().then(onSuccess, onError);
+    return finishGenerating().then(onSuccess).catch(onError);
 
     /**
      * Handles the successful response from the generation API.
@@ -6701,6 +6708,7 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
         const native = data?.choices?.[0]?.message?.native ?? null;
         const promptCache = getPromptCacheUsage(data?.usage);
         const hasToolCalls = canPerformToolCalls && ToolManager.hasToolCalls(data);
+        assertGenerationOutput(getMessage, { images: imageUrls, hasToolCalls });
         const providerReplay = requestContext ? { ...requestContext, text: getMessage } : null;
         kobold_horde_model = title;
 
@@ -6823,6 +6831,13 @@ async function GenerateInternal(type, { automatic_trigger, force_name2, quiet_pr
      * @throws {Error|object} Re-throws the exception
      */
     function onError(exception) {
+        if (exception?.code === 'generation.empty_output') {
+            toastr.error(
+                t`The model finished without returning a reply. Reasoning and token usage do not count as reply text. Retry or choose another connection or model.`,
+                t`Empty model response`,
+                { timeOut: 15000, extendedTimeOut: 20000, preventDuplicates: true },
+            );
+        }
         // if the response JSON was thrown (novel|textgenerationwebui|kobold), show the error message
         if (typeof exception?.error?.message === 'string') {
             toastr.error(exception.error.message, t`Text generation error`, { timeOut: 10000, extendedTimeOut: 20000 });

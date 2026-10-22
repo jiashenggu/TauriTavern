@@ -251,6 +251,7 @@
 - `/api/*`：应用核心 API（settings/chats/characters/ai/worldinfo…）
   - 用户设定沿用上游 settings 数据形状；列表刷新不写入资料，单项保存失败不影响其他修改。
 - `/api/backends/chat-completions/generate` 的流式响应由 Rust 进程内会话持有生成任务、移动端 best-effort 后台执行租约与未确认事件；前端通过单调递增的 `after_seq` 消费并确认，WebView 暂停后可在同一 Rust 进程内重放缺失事件。单次读取失败会使用相同 cursor 重试一次，第二次失败才关闭会话。后台租约失败或到期不拥有生成终止权；该保证不跨进程重启，也不伪装成上游 provider 的 HTTP 断点续传。
+- Legacy `Generate` 的文本响应完成时须包含非空白的新文本、图片或工具调用；仅思考字段、用量统计及正常结束标记不足以证明回复已交付。流式与非流式空响应以 `generation.empty_output` 拒绝，显示明确错误并释放生成门禁，不进入成功保存、成功消息事件或自动续写；续写时已有正文不计入本次新输出。流式失败仍沿用部分结果的错误清理，保留诊断显示，不将思考补作正文；取消请求保持原有取消语义。结构化 JSON 与专用 quiet 工具请求继续由各自响应处理器验证。
 - `/css/user.css`：用户自定义 CSS 覆盖文件（数据目录 `_css/user.css`）
 - `/scripts/extensions/third-party/*`：third-party 扩展静态资源端点（ESM/CSS/url()/字体/图片）
 - `/thumbnail`：缩略图端点（与 `__TAURITAVERN_THUMBNAIL__` 强耦合）
