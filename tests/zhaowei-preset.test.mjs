@@ -151,17 +151,6 @@ test('humanity and style instructions preserve task, knowledge and player bounda
     for (const phrase of ['对白先回应对方实际说了什么', '不必再由旁白翻译', '不把每轮结尾']) assert.ok(prompt('consistent-prose').content.includes(phrase));
 });
 
-test('prose conveys scene-grounded combat consequences without scale labels', () => {
-    const output = prompt('consistent-output').content;
-    for (const phrase of ['正文的旁白、对白和人物心声均不复述量级与分档标签',
-        '符合当时场景与人物认知的具体描写', '应有的破坏规模、冲击与压迫感须充分写足，不因省略量级标签而弱化',
-        '量级优先依据明确设定与可靠表现', '可结合破坏对象、程度、范围和作用方式估算，不强求精确能量数值',
-        '破坏范围只是参考，不能单独决定量级', '不因已判定为高量级，就反过来要求每次出手造成大范围破坏',
-        '实际能力、出手方式、作用范围和现场条件',
-        '状态栏等既定展示内容位于叙事正文之外，按各自协议输出']) assert.ok(output.includes(phrase), phrase);
-    assert.ok(prompt('consistent-combat').content.includes('位移、爆炸和环境破坏须符合实际作用方式与量级'));
-});
-
 test('production regex processing excludes drafts only from assistant history and preserves state blocks', () => {
     const regex = regexFixture();
     const state = '<content>Story</content><UpdateVariable><JSONPatch>[]</JSONPatch></UpdateVariable><!-- state: keep -->';

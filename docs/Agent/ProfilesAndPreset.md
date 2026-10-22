@@ -107,6 +107,14 @@ Profile 面板的“预设与模型”支持选择“独立连接 / 模型”：
 
 `descriptionForAgents` 用于向其他 Agent 介绍它适合处理什么工作。并发、任务数量和交接深度也在 `delegation` 中设置。完整流程见 [多 Agent 协作](SubAgent.md)。
 
+## 照微 Agent 的直接交付流程
+
+配套的「照微·Agent」预设与 `zhaowei-agent` Profile 使用“写作前规划 → writer 成稿 → 原样交付 → 状态保存”，不再设置主控审稿、润色或自动返修阶段。主控通过 Profile 的 `instructions.agentSystemPrompt` 指定该流程，不改变其他 Agent 的默认工作指令。
+
+普通剧情取得完整 writer 产物后，使用 `workspace.write_file(source_path=..., path="output/main.md")` 复制，不附 `edits`、`json_ops` 或重写的 `content`。主控仍读取产物来提取已发生的事件并维护状态，文件读取、SHA、JSON 校验、权限、预算和宿主确认不因此跳过。用户明确发起的 `/fix` 或改稿仍按指定范围执行。
+
+这是预设与 Profile 的模型工作指令，不是新增的程序级正文写入锁；通用工作区工具仍保留编辑能力。不能仅凭取消审稿规则就承诺少一次模型请求或保证 writer 的内容正确。运行配置需同时同步 Agent 预设、当前活动预设副本及两个 Profile，并保留本机模型绑定和其他参数；旧 Run 的冻结提示词不会被新配置改写。
+
 ## 源码
 
 Profile 以 JSON 保存到 `_tauritavern/agent-profiles/profiles/`，当前 schema 版本为 3。
