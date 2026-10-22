@@ -197,6 +197,7 @@ export function createAgentRunRuntimeApi({ safeInvoke }) {
 
     return {
         cancel,
+        readActivity: () => safeInvoke('read_agent_run_activity'),
         submitGuidance: guidance.submitGuidance,
         listRuns,
         retention: createAgentRunRetentionApi({ safeInvoke }),

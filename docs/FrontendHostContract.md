@@ -27,6 +27,10 @@
 
 开发态 HTTP 入口会先由 `scripts/tauri-dev-server.mjs` 注入 `src/dev-sw-bootstrap.js`，仅负责让持久 Service Worker registration 与当前 WebView 会话重新绑定，不参与应用模块初始化。
 
+开发热重载由 `src/dev-reload.js` 合并源码更新通知，在生成、聊天保存、Agent 状态保存、宿主提交或 presentation 收尾期间延后刷新。刷新前通过 `agent.readActivity()` 核对当前进程中的活跃 Run（包括等待宿主确认的 Run），并在异步查询返回后再次核对前端忙碌状态；查询失败或状态无法确认时保持等待，不假定安全空闲。进程中断后遗留的非终态历史记录不阻塞刷新，也不被自动取消或改写。该保护针对自动开发刷新，不替代手动刷新、退出或进程崩溃的恢复机制。修改开发服务器注入逻辑后，须重新启动开发服务才能采用新的重载客户端。
+
+确认空闲后，重载客户端通过 `flushDebouncedChatSave()` 提前执行并等待尚未进入保存队列的聊天防抖任务，每次保存完成后重新核对前后端活动状态，并处理等待期间新排入的防抖保存。直到确认空闲且没有待执行任务才刷新，不依赖 `beforeunload` 完成异步保存。若该 flush 抛错或保存 Promise 拒绝，本页面停止自动重载并在控制台报告原因；防抖任务被取走后队列为空不能证明保存成功，须先成功保存修改，再手动刷新。
+
 1. `src/init.js`：负责最早期的环境标记、可选 perf 开关与动态 import。
 2. `src/tauri-main.js`：薄入口，仅调用 `bootstrapTauriMain()`。
 3. `src/tauri/main/bootstrap.js`：composition root，创建 context、注册 routes、安装拦截器与补丁。

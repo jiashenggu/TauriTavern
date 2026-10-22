@@ -16,7 +16,7 @@ use super::timeline_projection::build_run_timeline_projection;
 use super::{AgentRunLiveProjection, AgentRuntimeService};
 use crate::dto::agent_dto::{
     AgentCancelRunDto, AgentReadEventsDto, AgentReadEventsResultDto, AgentReadWorkspaceFileDto,
-    AgentRunHandleDto, AgentStartRunDto, AgentWorkspaceFileDto,
+    AgentRunActivityDto, AgentRunHandleDto, AgentStartRunDto, AgentWorkspaceFileDto,
 };
 use crate::errors::ApplicationError;
 use crate::services::agent_identity::{validate_stable_chat_id, workspace_id_for_stable_chat_id};
@@ -30,6 +30,17 @@ use tt_domain::text_metrics::TextMetrics;
 use tt_ports::repositories::agent_run_repository::AgentRunEventReadQuery;
 
 impl AgentRuntimeService {
+    pub async fn read_run_activity(&self) -> Result<AgentRunActivityDto, ApplicationError> {
+        // Admission can be awaiting IO before inserting the live handle.
+        // Wait for it rather than reporting an idle runtime during that gap.
+        let _admission = self.run_lifecycle_lock.lock().await;
+        Ok(AgentRunActivityDto {
+            // Handles remain active through host presentation/checkpoint
+            // acknowledgement, even after the model loop has terminated.
+            active_run_ids: self.active_run_ids().await?,
+        })
+    }
+
     pub async fn start_run(
         self: &Arc<Self>,
         mut dto: AgentStartRunDto,

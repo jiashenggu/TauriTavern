@@ -39,6 +39,15 @@ async fn agent_runtime_checkpoint_publishes_terminal_state_after_host_presentati
     })
     .await
     .expect("runtime completion event");
+    assert_eq!(
+        fixture
+            .service
+            .read_run_activity()
+            .await
+            .unwrap()
+            .active_run_ids,
+        vec![handle.run_id.clone()]
+    );
     assert!(
         !fixture
             .agent_repository
@@ -86,6 +95,49 @@ async fn agent_runtime_checkpoint_publishes_terminal_state_after_host_presentati
     assert_eq!(completed.run.status, AgentRunStatus::Completed);
     assert_eq!(completed.terminal_seq, terminal_seq);
     assert_eq!(completed.presentation, Some(presentation));
+    assert!(
+        fixture
+            .service
+            .read_run_activity()
+            .await
+            .unwrap()
+            .active_run_ids
+            .is_empty()
+    );
+
+    // Simulate records left by an interrupted process. A fresh runtime must
+    // report idle without rewriting or cancelling historical runs.
+    let mut interrupted = fixture
+        .agent_repository
+        .load_run(&handle.run_id)
+        .await
+        .unwrap();
+    interrupted.status = AgentRunStatus::CallingModel;
+    fixture
+        .agent_repository
+        .save_run(&interrupted)
+        .await
+        .unwrap();
+    drop(fixture);
+    let restarted = agent_runtime_fixture_with_responses(&root, Vec::new());
+    assert!(
+        restarted
+            .service
+            .read_run_activity()
+            .await
+            .unwrap()
+            .active_run_ids
+            .is_empty()
+    );
+    assert_eq!(
+        restarted
+            .agent_repository
+            .load_run(&handle.run_id)
+            .await
+            .unwrap()
+            .status,
+        AgentRunStatus::CallingModel
+    );
 
     fs::remove_dir_all(root).await.unwrap();
 }

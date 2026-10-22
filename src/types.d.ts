@@ -752,6 +752,7 @@ type TauriTavernAgentApi = {
     promptAssembly: TauriTavernAgentPromptAssemblyApi;
     retention: TauriTavernAgentRetentionApi;
     approveToolCall: () => never;
+    readActivity: () => Promise<{ activeRunIds: string[] }>;
     listRuns: (input?: {
         chatRef?: TauriTavernChatRef;
         stableChatId?: string;

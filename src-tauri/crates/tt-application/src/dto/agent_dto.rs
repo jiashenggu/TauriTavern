@@ -25,6 +25,12 @@ pub struct AgentStateTargetDto {
     pub swipe_id: Option<usize>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRunActivityDto {
+    pub active_run_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentStateFieldDto {

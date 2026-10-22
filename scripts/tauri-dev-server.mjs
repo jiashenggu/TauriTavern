@@ -20,10 +20,8 @@ const bundleOutputRoots = rspackConfigs.map(config => config.output.path);
 
 const reloadClientScript = `
 <script type="module">
-{
-    const source = new EventSource(${JSON.stringify(reloadUrl)});
-    source.addEventListener('reload', () => globalThis.location.reload());
-}
+import { installDevReload } from '/dev-reload.js';
+installDevReload(${JSON.stringify(reloadUrl)});
 </script>
 `;
 

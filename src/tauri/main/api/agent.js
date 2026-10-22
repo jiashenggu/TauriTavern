@@ -214,6 +214,7 @@ export function createAgentApi({ safeInvoke, loadScript = () => import('../../..
             throw new Error('approveToolCall is not implemented');
         },
         listRuns: runtime.listRuns,
+        readActivity: runtime.readActivity,
     };
 }
 

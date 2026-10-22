@@ -32,6 +32,7 @@ const unsubscribe = agent.subscribe(run.runId, event => {
 | 方法 | 行为 |
 | --- | --- |
 | `cancel(runId)` | 请求取消，返回 Run handle；终态通过事件观察 |
+| `readActivity()` | 返回 `{ activeRunIds }`，列出当前进程中所有活跃 Run，包括等待宿主 presentation/checkpoint 确认的 Run；不读取历史状态来推断活跃性 |
 | `readCheckpoint(runId)` | 读取保存状态及可恢复性信息 |
 | `resume({ runId, additionalRounds?, revisionGuidance? })` | 续接同一 Run，或根据新要求修订已完成输出；返回含订阅游标 `afterSeq` 的 Run handle |
 | `submitGuidance({ runId, text, clientGuidanceId? })` | 向活跃 Run 补充指令，返回 `guidanceId` 与 `status: 'queued'` |
@@ -39,6 +40,8 @@ const unsubscribe = agent.subscribe(run.runId, event => {
 | `subscribeLiveProjection(runId, handler, options?)` | 订阅当前工具参数和推理文字预览，返回 unsubscribe |
 
 补充指令在下一次前台模型请求前加入上下文，已经发出的请求保持原样。尚未消费的指令随续接保留。该接口不创建聊天消息。
+
+`readActivity()` 等待正在进行的启动或恢复准入完成后读取运行器。返回值是查询时的快照，不锁定后续运行；调用方仍需核对自身的生成与保存状态。进程中断后遗留的非终态历史记录不会被列为活跃，也不会因此被改写或取消。
 
 `subscribe` 的选项是 `afterSeq`、`limit`、`intervalMs`、`onError`，默认从起点读取。实时预览只接受 `onError` 选项；它用于当前显示，历史过程从持久事件读取。
 
