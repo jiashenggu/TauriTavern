@@ -83,11 +83,15 @@ impl AgentInvocationRepository for FileAgentRepository {
                 error
             ))
         })? {
-            if !entry
-                .file_type()
-                .await
-                .map(|file_type| file_type.is_file())
-                .unwrap_or(false)
+            if entry
+                .path()
+                .extension()
+                .is_none_or(|extension| extension != "json")
+                || !entry
+                    .file_type()
+                    .await
+                    .map(|file_type| file_type.is_file())
+                    .unwrap_or(false)
             {
                 continue;
             }
@@ -149,11 +153,15 @@ impl AgentInvocationRepository for FileAgentRepository {
                 error
             ))
         })? {
-            if !entry
-                .file_type()
-                .await
-                .map(|file_type| file_type.is_file())
-                .unwrap_or(false)
+            if entry
+                .path()
+                .extension()
+                .is_none_or(|extension| extension != "json")
+                || !entry
+                    .file_type()
+                    .await
+                    .map(|file_type| file_type.is_file())
+                    .unwrap_or(false)
             {
                 continue;
             }

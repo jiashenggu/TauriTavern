@@ -990,7 +990,7 @@ async fn append_text_is_atomic_per_path_and_creates_missing_files() {
 }
 
 #[tokio::test]
-async fn repository_round_trips_invocations() {
+async fn repository_round_trips_invocations_and_ignores_unpublished_records() {
     let root = temp_root();
     let repository = FileAgentRepository::new(root.clone());
     let run = sample_run_with_id("run_invocation");
@@ -1036,6 +1036,60 @@ async fn repository_round_trips_invocations() {
         .expect("invocation exists");
     assert_eq!(loaded_optional.profile_id, "default-writer");
     assert_eq!(repository.list_invocations(&run.id).await.unwrap().len(), 1);
+    let task = tt_domain::models::agent::AgentTaskRecord {
+        id: "task_child".into(),
+        run_id: run.id.clone(),
+        parent_invocation_id: invocation.id.clone(),
+        child_invocation_id: "inv_child".into(),
+        target_profile_id: "writer".into(),
+        workspace_key: "writer".into(),
+        continuation: tt_domain::models::agent::AgentDelegationContinuation::ReturnToParent,
+        status: tt_domain::models::agent::AgentTaskStatus::Running,
+        task: Value::Null,
+        created_by_tool_call_id: None,
+        result_ref: None,
+        error: None,
+        created_at: now,
+        updated_at: now,
+    };
+    repository.save_task(&task).await.unwrap();
+    let run_dir = repository.load_run_dir(&run.id).await.unwrap();
+    for (directory, contents) in [
+        ("invocations", serde_json::to_vec(&invocation).unwrap()),
+        ("tasks", serde_json::to_vec(&task).unwrap()),
+    ] {
+        fs::write(
+            run_dir.join(directory).join(".tauritavern-incomplete.tmp"),
+            b"{",
+        )
+        .await
+        .unwrap();
+        fs::write(
+            run_dir.join(directory).join(".tauritavern-complete.tmp"),
+            contents,
+        )
+        .await
+        .unwrap();
+    }
+    let invocations = repository.list_invocations(&run.id).await.unwrap();
+    assert_eq!(invocations.len(), 1);
+    assert_eq!(invocations[0].id, invocation.id);
+    let tasks = repository.list_tasks(&run.id).await.unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].id, task.id);
+    for directory in ["invocations", "tasks"] {
+        fs::write(run_dir.join(directory).join("broken.json"), b"{")
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        repository.list_invocations(&run.id).await,
+        Err(DomainError::InvalidData(_))
+    ));
+    assert!(matches!(
+        repository.list_tasks(&run.id).await,
+        Err(DomainError::InvalidData(_))
+    ));
 
     fs::remove_dir_all(root).await.expect("cleanup");
 }
