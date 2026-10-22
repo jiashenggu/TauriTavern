@@ -2,7 +2,6 @@ import type { AgentSystemPanelController } from './AgentSystemPanelController';
 import { isBuiltinProfile, type AgentSystemPanelSnapshot, type Tr } from './AgentSystemPanelContract';
 import {
     availablePresetOptions,
-    hasExternalModelBinding,
     isProfileRuntimeStateCurrent,
     modelSummaryLabel,
     modelTargetBadges,
@@ -65,7 +64,9 @@ export function ProfileBindingSection({ snapshot, controller, tr }: ProfileSecti
     const presetOptionsWithSelected = availablePresetOptions(presetOptions, draft);
     const selectedTarget = selectedModelTarget(modelTargets, draft);
     const selectedTargetId = selectedTarget?.id || '';
-    const externalModelBinding = hasExternalModelBinding(draft, modelTargets);
+    const connectionRef = draft.model.connectionRef || '';
+    const connections = snapshot.llmConnections ?? [];
+    const selectedConnection = connections.find(connection => connection.id === connectionRef);
     const warnings = profileConfigurationWarnings({
         draft,
         toolCatalogDiagnostics: snapshot.toolCatalogDiagnostics,
@@ -75,6 +76,7 @@ export function ProfileBindingSection({ snapshot, controller, tr }: ProfileSecti
         profilePreviewError: snapshot.profilePreviewError,
         presetOptions,
         modelTargets,
+        llmConnections: snapshot.llmConnections,
     }, tr);
 
     return (
@@ -122,16 +124,14 @@ export function ProfileBindingSection({ snapshot, controller, tr }: ProfileSecti
                     <span>{tr('modelSource')}</span>
                     <select
                         value={draft.model.mode}
-                        disabled={builtin}
+                        disabled={builtin || snapshot.saving}
                         onChange={(event) => controller.setModelMode(event.target.value)}
                     >
                         <option value="currentPromptSnapshot">{tr('currentChatModel')}</option>
                         {draft.model.mode === 'requiresConfiguration' && (
                             <option value="requiresConfiguration">{tr('modelRequiresConfiguration')}</option>
                         )}
-                        <option value="connectionRef" disabled={modelTargets.length === 0 && draft.model.mode !== 'connectionRef'}>
-                            {tr('savedModelTarget')}
-                        </option>
+                        <option value="connectionRef">{tr('independentModel')}</option>
                     </select>
                 </label>
                 {draft.model.mode === 'connectionRef' && modelTargets.length > 0 ? (
@@ -139,10 +139,10 @@ export function ProfileBindingSection({ snapshot, controller, tr }: ProfileSecti
                         <span>{tr('savedModel')}</span>
                         <select
                             value={selectedTargetId}
-                            disabled={builtin}
+                            disabled={builtin || snapshot.saving}
                             onChange={(event) => controller.setModelTarget(event.target.value)}
                         >
-                            {externalModelBinding && <option value="">{modelSummaryLabel(draft, modelTargets, tr)}</option>}
+                            <option value="" disabled>{tr('chooseSavedModel')}</option>
                             {modelTargets.map((target) => (
                                 <option key={target.id} value={target.id}>{target.name || target.model}</option>
                             ))}
@@ -169,14 +169,45 @@ export function ProfileBindingSection({ snapshot, controller, tr }: ProfileSecti
                         </div>
                     </div>
                 )}
-                {!selectedTarget && externalModelBinding && (
-                    <div className="ttas-binding-summary ttas-binding-warning ttas-span-2">
-                        <i className="fa-solid fa-link"></i>
-                        <div>
-                            <strong>{draft.model.connectionRef}</strong>
-                            <span>{draft.model.modelId}</span>
+                {draft.model.mode === 'connectionRef' && (
+                    <>
+                        <label className="ttas-field">
+                            <span>{tr('llmConnection')}</span>
+                            <select
+                                value={connectionRef}
+                                disabled={builtin || snapshot.saving}
+                                onChange={event => controller.setModelConnection(event.target.value)}
+                            >
+                                <option value="" disabled>{tr('selectLlmConnection')}</option>
+                                {connectionRef && !selectedConnection && (
+                                    <option value={connectionRef} disabled>{tr('currentUnlistedConnection', { id: connectionRef })}</option>
+                                )}
+                                {connections.map(connection => (
+                                    <option key={connection.id} value={connection.id}>{connection.displayName} ({connection.id})</option>
+                                ))}
+                            </select>
+                        </label>
+                        <label className="ttas-field">
+                            <span>{tr('modelId')}</span>
+                            <input
+                                className="text_pole"
+                                value={draft.model.modelId || ''}
+                                disabled={builtin || snapshot.saving}
+                                required
+                                onChange={event => controller.setModelId(event.target.value)}
+                            />
+                        </label>
+                        <div className="ttas-binding-summary ttas-span-2">
+                            <div>
+                                {selectedConnection && <strong>{selectedConnection.chatCompletionSource}{selectedConnection.customApiFormat ? ` / ${selectedConnection.customApiFormat}` : ''}</strong>}
+                                <span>{tr('modelBindingHint')}</span>
+                                {snapshot.llmConnectionsLoading && <span role="status">{tr('loadingLlmConnections')}</span>}
+                                {snapshot.llmConnectionsError && <span role="alert">{tr('llmConnectionsUnavailable', { error: snapshot.llmConnectionsError })}</span>}
+                                {!snapshot.llmConnectionsLoading && snapshot.llmConnections?.length === 0 && <span>{tr('noLlmConnections')}</span>}
+                                <button type="button" className="menu_button" disabled={snapshot.llmConnectionsLoading || snapshot.saving} onClick={() => void controller.refreshLlmConnections()}>{tr('refreshLlmConnections')}</button>
+                            </div>
                         </div>
-                    </div>
+                    </>
                 )}
                 {warnings.length > 0 && (
                     <div className="ttas-binding-summary ttas-binding-warning ttas-span-2">

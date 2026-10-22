@@ -52,7 +52,7 @@ type LlmConnectionDefinition = {
 
 ## Profile 与 Model Target
 
-Profile 使用 `model.mode = "connectionRef"`，保存 `connectionRef` 和 `modelId`。具体配置见 [Profile 与预设](../Agent/ProfilesAndPreset.md)。
+Profile 使用 `model.mode = "connectionRef"`，保存 `connectionRef` 和 `modelId`。Agent Profile 表单可通过 `list()` 的连接摘要选择现有连接，并独立编辑模型 ID；不要求该连接必须由 Connection Manager 的 Model Target 创建，也不因此改写原生连接的端点、密钥或参数。目录刷新沿用连接变更通知，过期返回不覆盖较新的列表；列表失败或引用缺失不会自动替换草稿绑定。具体配置见 [Profile 与预设](../Agent/ProfilesAndPreset.md)。
 
 Agent System 将 Connection Manager 的 Model Target 物化为 `model-target-<target.id>` 连接，在启动、Target 更新、Profile 保存和 Run 启动时同步。无法表示的 Target 配置会报告错误，并移除对应旧连接，供 Profile 诊断显示。
 

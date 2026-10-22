@@ -63,6 +63,8 @@ export type AgentSystemDraftEditor = {
     setPresetName: (name: string) => void;
     setModelMode: (mode: string) => void;
     setModelTarget: (targetId: string) => void;
+    setModelConnection: (connectionId: string) => void;
+    setModelId: (modelId: string) => void;
     setCanDelegate: (enabled: boolean) => void;
     setCanHandoff: (enabled: boolean) => void;
     setRunPresentation: (presentation: string) => void;
@@ -179,7 +181,8 @@ export function createAgentSystemDraftEditor(context: AgentSystemDraftEditorCont
                 return;
             }
             editDraftInvalidatingRuntimeState((draft) => {
-                applyModelMode(draft, mode, context.getSnapshot().modelTargets);
+                const snapshot = context.getSnapshot();
+                applyModelMode(draft, mode, snapshot.modelTargets, snapshot.llmConnections ?? []);
             });
         },
         setModelTarget(targetId) {
@@ -188,6 +191,21 @@ export function createAgentSystemDraftEditor(context: AgentSystemDraftEditorCont
             }
             editDraftInvalidatingRuntimeState((draft) => {
                 applyModelTarget(draft, context.getSnapshot().modelTargets, targetId);
+            });
+        },
+        setModelConnection(connectionId) {
+            if (isBuiltin() || context.getSnapshot().draft.model.mode !== 'connectionRef') return;
+            if (!context.getSnapshot().llmConnections?.some(connection => connection.id === connectionId)) {
+                throw new Error(deps.tr('agentProfileModelBindingMissing', { id: connectionId }));
+            }
+            editDraftInvalidatingRuntimeState(draft => {
+                draft.model.connectionRef = connectionId;
+            });
+        },
+        setModelId(modelId) {
+            if (isBuiltin() || context.getSnapshot().draft.model.mode !== 'connectionRef') return;
+            editDraftInvalidatingRuntimeState(draft => {
+                draft.model.modelId = modelId;
             });
         },
         setCanDelegate(enabled) {

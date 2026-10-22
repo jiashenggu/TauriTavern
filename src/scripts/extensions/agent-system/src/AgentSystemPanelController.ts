@@ -45,6 +45,7 @@ export type AgentSystemPanelSession = {
     setTab: (tab: string) => Promise<void>;
     selectProfile: (profileId: string) => Promise<void>;
     setProfileEditMode: (mode: AgentProfileEditMode) => void;
+    refreshLlmConnections: () => Promise<void>;
     scrollToProfileSection: (sectionId: AgentProfileSectionId) => void;
 };
 
@@ -61,6 +62,7 @@ export function createAgentSystemPanelController(deps: AgentSystemPanelControlle
     let initPromise: Promise<void> | null = null;
     let lastLoadedProfileJson = prettyJson(defaultProfile());
     let profileSelectionToken = 0;
+    let connectionListToken = 0;
     let profileSelectionSettingsQueue = Promise.resolve();
     // Remember direct-run presentation while converting profiles to/from SubAgent-only.
     const mainAgentPresentationByProfileId: AgentPresentationMemory = {};
@@ -197,9 +199,7 @@ export function createAgentSystemPanelController(deps: AgentSystemPanelControlle
 
     async function refreshToolCatalog(): Promise<void> {
         const result = await deps.listTools();
-        if (disposed) {
-            return;
-        }
+        if (disposed) return;
         const toolIds = toolIdsForDraft(snapshot.draft, result.tools);
         patch({
             toolItems: result.tools,
@@ -209,12 +209,20 @@ export function createAgentSystemPanelController(deps: AgentSystemPanelControlle
         });
     }
 
-    function refreshPresetOptions(): void {
-        patch({ presetOptions: deps.listPresetOptions() });
-    }
-
-    function refreshModelTargets(): void {
-        patch({ modelTargets: deps.listModelTargets() });
+    async function refreshLlmConnections(): Promise<void> {
+        const token = ++connectionListToken;
+        patch({ llmConnectionsLoading: true, llmConnectionsError: '' });
+        try {
+            const connections = await deps.listLlmConnections();
+            if (disposed || token !== connectionListToken) return;
+            patch({ llmConnections: [...connections].sort((a, b) => a.displayName.localeCompare(b.displayName) || a.id.localeCompare(b.id)) });
+        } catch (error) {
+            if (disposed || token !== connectionListToken) return;
+            patch({ llmConnections: null, llmConnectionsError: errorText(error) });
+            throw error;
+        } finally {
+            if (!disposed && token === connectionListToken) patch({ llmConnectionsLoading: false });
+        }
     }
 
     async function loadSupplemental(operation: () => void | Promise<void>): Promise<void> {
@@ -321,20 +329,16 @@ export function createAgentSystemPanelController(deps: AgentSystemPanelControlle
     }
 
     async function handleModelTargetsChanged(): Promise<void> {
-        if (!snapshot.initialized) {
-            return;
-        }
-        refreshModelTargets();
-        if (disposed || snapshot.saving) {
-            return;
-        }
+        if (!snapshot.initialized) return;
+        patch({ modelTargets: deps.listModelTargets() });
+        if (disposed || snapshot.saving) return;
         await refreshCurrentProfileRuntimeState();
     }
 
     async function handleLlmConnectionsChanged(): Promise<void> {
-        if (!snapshot.initialized || snapshot.saving) {
-            return;
-        }
+        if (!snapshot.initialized) return;
+        await refreshLlmConnections();
+        if (disposed || snapshot.saving) return;
         await refreshCurrentProfileRuntimeState();
     }
 
@@ -412,8 +416,9 @@ export function createAgentSystemPanelController(deps: AgentSystemPanelControlle
                     deps.onRunsTabActivated();
                 }
                 await Promise.all([
-                    loadSupplemental(refreshPresetOptions),
-                    loadSupplemental(refreshModelTargets),
+                    loadSupplemental(() => patch({ presetOptions: deps.listPresetOptions() })),
+                    loadSupplemental(() => patch({ modelTargets: deps.listModelTargets() })),
+                    loadSupplemental(refreshLlmConnections),
                     loadSupplemental(refreshToolCatalog),
                 ]);
             } catch (error) {
@@ -486,6 +491,7 @@ export function createAgentSystemPanelController(deps: AgentSystemPanelControlle
             });
         },
         ...draftEditor,
+        refreshLlmConnections: () => execute(handleLlmConnectionsChanged),
         saveProfile: () => execute(persistence.saveProfile),
         deleteProfile: () => execute(persistence.deleteProfile),
         exportSelectedProfile: () => execute(persistence.exportSelectedProfile),

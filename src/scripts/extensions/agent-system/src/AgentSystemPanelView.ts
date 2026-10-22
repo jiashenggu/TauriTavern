@@ -221,6 +221,7 @@ export function profileConfigurationWarnings(input: {
     profilePreviewError: string;
     presetOptions: readonly string[];
     modelTargets: readonly AgentModelTarget[];
+    llmConnections: readonly TauriTavernLlmConnectionSummary[] | null;
 }, tr: Tr): string[] {
     const warnings = input.toolCatalogDiagnostics
         .map((diagnostic) => diagnostic.message || diagnostic.code || tr('unknownError'));
@@ -232,7 +233,8 @@ export function profileConfigurationWarnings(input: {
         if (missingPreset) {
             warnings.push(tr('agentProfilePresetMissing', { name: missingPreset }));
         }
-        if (hasExternalModelBinding(input.draft, input.modelTargets)) {
+        if (hasExternalModelBinding(input.draft, input.modelTargets) && input.draft.model.connectionRef && input.llmConnections !== null
+            && !input.llmConnections.some(connection => connection.id === input.draft.model.connectionRef)) {
             warnings.push(tr('agentProfileModelBindingMissing', { id: input.draft.model.connectionRef }));
         }
     }

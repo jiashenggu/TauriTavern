@@ -53,7 +53,9 @@ await agent.profiles.save(reviewer);
 
 这是 Profile 中的绑定片段。`writer-model` 需要是本机已经保存的连接。独立预设使用 OpenAI/chat-completion Preset，组装方式见 [Prompt assembly](PromptAssembly.md)。
 
-Profile 面板中的 Model Target 会物化为 LLM Connection。连接的端点和凭据更新供后续解析使用，Profile 的 `modelId` 则保留用户选定的值。导出或嵌入到角色卡、预设时，本机的独立模型绑定会改为 `requiresConfiguration`，导入后重新选择即可。
+Profile 面板的“预设与模型”支持选择“独立连接 / 模型”：从 LLM 连接目录选择已有连接，并直接填写完整模型 ID；主控与 SubAgent 均可编辑，内置默认 Profile 仍需先复制。连接目录只读取摘要，不展示凭据。切换连接保留当前模型 ID，须确认目标接口及连接参数兼容；保存只更新原生连接引用和 Profile 的模型 ID，不修改该原生连接本身。目录加载失败或当前引用未列出时保留原值并显示提示，不自动换成其他连接；可刷新目录重试。
+
+原有“已保存模型”仍可作为快捷方式，同时填入连接与模型 ID，保存时按原规则物化 Model Target 对应的 LLM Connection。随后手工改模型 ID 不会自动被 Target 的旧模型名覆盖。连接的端点、凭据、路由与参数覆盖沿用对应连接，更新供后续解析使用，已准备好的调用不被改写。导出或嵌入到角色卡、预设时，本机的独立模型绑定会改为 `requiresConfiguration`，导入后重新选择即可。
 
 ## 调整工作方式
 

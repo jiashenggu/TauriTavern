@@ -148,6 +148,10 @@ export function createAgentSystemPanelPersistence(
         context.commit({ saving: true });
         try {
             const profile = normalizeProfileForSave(snapshot.draft);
+            if (profile.model.mode === 'connectionRef') {
+                if (!profile.model.connectionRef) throw new Error(deps.tr('llmConnectionRequired'));
+                if (!profile.model.modelId) throw new Error(deps.tr('modelIdRequired'));
+            }
             const wasActiveProfile = activeProfileIdOf(snapshot.settings) === profile.id;
             await persistProfileModelBinding(profile);
             await deps.getProfilesApi().save({ profile });

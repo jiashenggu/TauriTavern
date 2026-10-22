@@ -7,162 +7,11 @@ import {
     createAgentSystemPanelController,
     type AgentSystemPanelController,
 } from './AgentSystemPanelController';
-import type { AgentSystemPanelControllerDeps } from './AgentSystemPanelContract';
+import { createPanelWorld, settings, summary, tr } from './agent-system-panel-test-fixture';
 import { createRunHistoryController } from './RunHistoryController';
 import { createRunRetentionController } from './RunRetentionController';
 import { defaultProfile } from './profile-model';
 import type { AgentSystemSettings } from './settings-store';
-
-type ProfileListResult = Awaited<ReturnType<TauriTavernAgentProfilesApi['list']>>;
-
-function formatParam(value: unknown): string {
-    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-        return String(value);
-    }
-    return JSON.stringify(value) ?? '';
-}
-
-const tr = (key: string, params: Record<string, unknown> = {}): string => (
-    [key, ...Object.entries(params).map(([name, value]) => `${name}=${formatParam(value)}`)].join(' ')
-);
-
-function settings(editingProfileId: string): AgentSystemSettings {
-    return {
-        agentModeEnabled: true,
-        chatInputToggleHidden: false,
-        activeProfileId: 'default-writer',
-        editingProfileId,
-        activeTab: 'profiles',
-        runTimelineHeightPx: null,
-    };
-}
-
-function summary(profile: TauriTavernAgentProfileDefinition): TauriTavernAgentProfileSummary {
-    return {
-        id: profile.id,
-        displayName: profile.displayName,
-        ...(profile.description !== undefined ? { description: profile.description } : {}),
-        directRunnable: profile.run.directRunnable,
-    };
-}
-
-function healthyProfile(profileId: string): TauriTavernAgentProfileHealth {
-    return {
-        profileId,
-        previewAvailable: true,
-        promptAssemblyAvailable: true,
-        directRunAvailable: true,
-        subAgentAvailable: true,
-        diagnostics: [],
-    };
-}
-
-function createPanelWorld(selectedProfile = defaultProfile()) {
-    const definitions = new Map<string, TauriTavernAgentProfileDefinition>();
-    const builtin = defaultProfile();
-    definitions.set(builtin.id, builtin);
-    definitions.set(selectedProfile.id, selectedProfile);
-
-    const state = {
-        settings: settings(selectedProfile.id),
-        definitions,
-        listResults: [] as ProfileListResult[],
-        listCount: 0,
-        repairs: [] as Array<{ profileId: string; action: 'delete' | 'normalizeIdentity' }>,
-        confirmations: [] as string[],
-        confirm: true,
-        warnings: [] as string[],
-        errors: [] as string[],
-        saves: [] as TauriTavernAgentProfileDefinition[],
-        presetOptions: [] as string[],
-        health: healthyProfile(selectedProfile.id),
-        resolveError: null as Error | null,
-        profilesListener: null as (() => void) | null,
-        subscribers: { profiles: 0, modelTargets: 0, llmConnections: 0 },
-    };
-
-    const profilesApi: TauriTavernAgentProfilesApi = {
-        list: () => {
-            state.listCount += 1;
-            const queued = state.listResults.shift();
-            return Promise.resolve(queued ?? {
-                profiles: [...state.definitions.values()].map(summary),
-                issues: [],
-            });
-        },
-        load: (input) => {
-            const profileId = typeof input === 'string' ? input : input.profileId;
-            const profile = state.definitions.get(profileId);
-            return Promise.resolve({ profile: profile ? structuredClone(profile) : null });
-        },
-        diagnose: () => Promise.resolve(state.health),
-        resolveSystemPrompt: () => state.resolveError
-            ? Promise.reject(state.resolveError)
-            : Promise.resolve({ agentSystemPrompt: 'Resolved Agent system prompt.' }),
-        repairFile: (input) => {
-            state.repairs.push(input);
-            return Promise.resolve();
-        },
-        retargetPresetRefs: () => Promise.resolve({ updated: 0, profileIds: [] }),
-        save: (input) => {
-            const profile = 'profile' in input ? input.profile : input;
-            state.saves.push(profile);
-            state.definitions.set(profile.id, structuredClone(profile));
-            return Promise.resolve();
-        },
-        delete: (input) => {
-            state.definitions.delete(typeof input === 'string' ? input : input.profileId);
-            return Promise.resolve();
-        },
-    };
-
-    const deps: AgentSystemPanelControllerDeps = {
-        loadSettings: () => Promise.resolve(state.settings),
-        patchSettings: (current, patch) => {
-            state.settings = { ...current, ...patch };
-            return Promise.resolve(state.settings);
-        },
-        getProfilesApi: () => profilesApi,
-        listTools: () => Promise.resolve({ tools: [], diagnostics: [] }),
-        listPresetOptions: () => state.presetOptions,
-        listModelTargets: () => [],
-        saveModelTargetConnection: () => Promise.resolve(),
-        subscribeProfilesChanged: (listener) => {
-            state.subscribers.profiles += 1;
-            state.profilesListener = listener;
-            return () => {
-                state.subscribers.profiles -= 1;
-            };
-        },
-        subscribeModelTargetsChanged: () => {
-            state.subscribers.modelTargets += 1;
-            return () => {
-                state.subscribers.modelTargets -= 1;
-            };
-        },
-        subscribeLlmConnectionsChanged: () => {
-            state.subscribers.llmConnections += 1;
-            return () => {
-                state.subscribers.llmConnections -= 1;
-            };
-        },
-        confirmAction: (message) => {
-            state.confirmations.push(message);
-            return Promise.resolve(state.confirm);
-        },
-        downloadBlob: () => Promise.resolve({ mode: 'browser-download', completed: true }),
-        notifyError: (error) => {
-            state.errors.push(error instanceof Error ? error.message : 'unknown error');
-        },
-        notifyWarning: (message) => {
-            state.warnings.push(message);
-        },
-        notifySuccess: () => undefined,
-        onRunsTabActivated: () => undefined,
-        tr,
-    };
-    return { deps, state };
-}
 
 const disposables: Array<{ dispose: () => void }> = [];
 
@@ -207,6 +56,125 @@ function renderPanel(controller: AgentSystemPanelController): void {
 afterEach(() => {
     cleanup();
     disposables.splice(0).forEach((disposable) => disposable.dispose());
+});
+
+test('native connection bindings are editable without creating a Model Target or changing other profile settings', async () => {
+    const profile = defaultProfile('scene-writer');
+    profile.model = { mode: 'connectionRef', connectionRef: 'writer-low', modelId: 'original-model' };
+    profile.run.directRunnable = false;
+    profile.run.presentation = 'background';
+    profile.delegation.callable = true;
+    profile.delegation.allowAsSubagent = true;
+    const { deps, state } = createPanelWorld(profile);
+    deps.listLlmConnections = () => Promise.resolve([
+        { id: 'writer-low', displayName: 'Writer Low', chatCompletionSource: 'custom' },
+        { id: 'other-route', displayName: 'Other Route', chatCompletionSource: 'custom' },
+    ]);
+    deps.saveModelTargetConnection = () => Promise.reject(new Error('Native binding must not write a connection'));
+    const controller = createAgentSystemPanelController(deps);
+    const user = userEvent.setup();
+    renderPanel(controller);
+    await act(async () => controller.init());
+    const connection = screen.getByRole<HTMLSelectElement>('combobox', { name: 'llmConnection' });
+    const model = screen.getByRole<HTMLInputElement>('textbox', { name: 'modelId' });
+    expect(connection.value).toBe('writer-low');
+    expect(model.value).toBe('original-model');
+    expect(screen.queryByText('agentProfileModelBindingMissing id=writer-low')).toBeNull();
+    await user.selectOptions(connection, 'other-route');
+    expect(model.value).toBe('original-model');
+    await user.clear(model);
+    await user.type(model, 'replacement-model');
+    expect(state.saves).toHaveLength(0);
+    await act(async () => controller.saveProfile());
+    expect(state.saves).toHaveLength(1);
+    expect(state.saves[0]?.model).toEqual({ mode: 'connectionRef', connectionRef: 'other-route', modelId: 'replacement-model' });
+    const saved = structuredClone(state.saves[0]);
+    if (!saved) throw new Error('profile not saved');
+    saved.model = profile.model;
+    expect(saved).toEqual(profile);
+    expect(controller.getSnapshot().draft.model.modelId).toBe('replacement-model');
+    await user.clear(screen.getByRole('textbox', { name: 'modelId' }));
+    await act(async () => { await expect(controller.saveProfile()).rejects.toThrow('modelIdRequired'); });
+    expect(state.saves).toHaveLength(1);
+    await user.selectOptions(screen.getByRole('combobox', { name: 'modelSource' }), 'currentPromptSnapshot');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'modelSource' }), 'connectionRef');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'llmConnection' }), 'writer-low');
+    expect(controller.getSnapshot().draft.model).toEqual({ mode: 'connectionRef', connectionRef: 'writer-low', modelId: '' });
+});
+
+test('connection directory failure, retry and deletion preserve a dirty model binding', async () => {
+    const profile = defaultProfile('native-writer');
+    profile.model = { mode: 'connectionRef', connectionRef: 'native', modelId: 'original' };
+    const { deps, state } = createPanelWorld(profile);
+    deps.listLlmConnections = () => Promise.reject(new Error('directory unavailable'));
+    const controller = createAgentSystemPanelController(deps);
+    const user = userEvent.setup();
+    renderPanel(controller);
+    await act(async () => controller.init());
+    expect(screen.getByText('llmConnectionsUnavailable error=directory unavailable')).toBeDefined();
+    expect(screen.getByRole<HTMLSelectElement>('combobox', { name: 'llmConnection' }).value).toBe('native');
+    await user.clear(screen.getByRole('textbox', { name: 'modelId' }));
+    await user.type(screen.getByRole('textbox', { name: 'modelId' }), 'unsaved-model');
+    deps.listLlmConnections = () => Promise.resolve([{ id: 'native', displayName: 'Native', chatCompletionSource: 'custom' }]);
+    await user.click(screen.getByRole('button', { name: 'refreshLlmConnections' }));
+    await waitFor(() => expect(controller.getSnapshot().llmConnections).toHaveLength(1));
+    expect(screen.queryByText('agentProfileModelBindingMissing id=native')).toBeNull();
+    deps.listLlmConnections = () => Promise.resolve<TauriTavernLlmConnectionSummary[]>([]);
+    act(() => state.llmConnectionsListener?.());
+    await waitFor(() => expect(controller.getSnapshot().llmConnections).toHaveLength(0));
+    expect(controller.getSnapshot().draft.model).toEqual({ mode: 'connectionRef', connectionRef: 'native', modelId: 'unsaved-model' });
+    expect(screen.getByText('agentProfileModelBindingMissing id=native')).toBeDefined();
+    expect(state.saves).toHaveLength(0);
+});
+
+test('saved Model Targets still fill both binding fields while a custom model ID survives save', async () => {
+    const profile = defaultProfile('target-writer');
+    const { deps, state } = createPanelWorld(profile);
+    const target = { id: 'saved', name: 'Saved target', kind: 'tauritavern.modelTarget', mode: 'cc', api: 'custom', model: 'original', secretRef: { key: 'fixture', id: 'fixture' } };
+    deps.listModelTargets = () => [target];
+    const order: string[] = [];
+    deps.saveModelTargetConnection = () => { order.push('connection'); return Promise.resolve(); };
+    const save = deps.getProfilesApi().save;
+    deps.getProfilesApi().save = input => { order.push('profile'); return save(input); };
+    const controller = createAgentSystemPanelController(deps);
+    const user = userEvent.setup();
+    renderPanel(controller);
+    await act(async () => controller.init());
+    await user.selectOptions(screen.getByRole('combobox', { name: 'modelSource' }), 'connectionRef');
+    expect(screen.getByRole<HTMLInputElement>('textbox', { name: 'modelId' }).value).toBe('original');
+    await act(async () => controller.saveProfile());
+    expect(order).toEqual(['connection', 'profile']);
+    await user.clear(screen.getByRole('textbox', { name: 'modelId' }));
+    await user.type(screen.getByRole('textbox', { name: 'modelId' }), 'override');
+    expect(screen.getByRole<HTMLSelectElement>('combobox', { name: 'savedModel' }).value).toBe('');
+    await act(async () => controller.saveProfile());
+    expect(state.saves.at(-1)?.model).toEqual({ mode: 'connectionRef', connectionRef: 'model-target-saved', modelId: 'override' });
+    await user.selectOptions(screen.getByRole('combobox', { name: 'savedModel' }), 'saved');
+    expect(screen.getByRole<HTMLInputElement>('textbox', { name: 'modelId' }).value).toBe('original');
+    await act(async () => controller.selectProfile('default-writer'));
+    expect(screen.getByRole<HTMLSelectElement>('combobox', { name: 'modelSource' }).disabled).toBe(true);
+});
+
+test('late connection directory results cannot replace a newer catalog or update a disposed panel', async () => {
+    const { deps } = createPanelWorld(defaultProfile('writer'));
+    const controller = createAgentSystemPanelController(deps);
+    disposables.push(controller);
+    await controller.init();
+    const pending: Array<(connections: TauriTavernLlmConnectionSummary[]) => void> = [];
+    deps.listLlmConnections = () => new Promise(resolve => pending.push(resolve));
+    const older = controller.refreshLlmConnections();
+    const newer = controller.refreshLlmConnections();
+    const latest = [{ id: 'latest', displayName: 'Latest', chatCompletionSource: 'custom' }];
+    pending[1]?.(latest);
+    await newer;
+    pending[0]?.([{ id: 'old', displayName: 'Old', chatCompletionSource: 'custom' }]);
+    await older;
+    expect(controller.getSnapshot().llmConnections).toEqual(latest);
+    const closing = controller.refreshLlmConnections();
+    controller.dispose();
+    pending[2]?.([]);
+    await closing;
+    expect(controller.getSnapshot().llmConnections).toEqual(latest);
 });
 
 test('repairs profile list issues and renders the refreshed list', async () => {

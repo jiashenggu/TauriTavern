@@ -230,6 +230,9 @@ export type AgentSystemPanelSnapshot = {
     selectedToolId: string;
     presetOptions: string[];
     modelTargets: AgentModelTarget[];
+    llmConnections: TauriTavernLlmConnectionSummary[] | null;
+    llmConnectionsLoading: boolean;
+    llmConnectionsError: string;
 };
 
 export type AgentSystemPanelControllerDeps = {
@@ -246,6 +249,7 @@ export type AgentSystemPanelControllerDeps = {
     }>;
     listPresetOptions: () => string[];
     listModelTargets: () => AgentModelTarget[];
+    listLlmConnections: () => Promise<TauriTavernLlmConnectionSummary[]>;
     saveModelTargetConnection: (target: AgentModelTarget) => Promise<unknown>;
     subscribeProfilesChanged: (listener: () => void) => () => void;
     subscribeModelTargetsChanged: (listener: () => void) => () => void;
@@ -295,5 +299,8 @@ export function createInitialPanelSnapshot(): AgentSystemPanelSnapshot {
         selectedToolId: FIRST_KNOWN_TOOL_ID,
         presetOptions: [],
         modelTargets: [],
+        llmConnections: null,
+        llmConnectionsLoading: false,
+        llmConnectionsError: '',
     };
 }

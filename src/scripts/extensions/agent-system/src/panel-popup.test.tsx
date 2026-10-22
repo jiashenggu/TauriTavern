@@ -52,6 +52,7 @@ function installHost(tryGetJson: () => Promise<StoredSettingsResult>): void {
                     },
                 },
                 llmConnections: {
+                    list: () => Promise.resolve({ connections: [] }),
                     save: () => Promise.resolve(),
                 },
             },

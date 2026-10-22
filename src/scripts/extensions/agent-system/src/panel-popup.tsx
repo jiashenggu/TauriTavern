@@ -152,6 +152,11 @@ export function openAgentSystemPanel(): void {
         },
         listPresetOptions,
         listModelTargets: listSavedModelTargets,
+        listLlmConnections: async () => {
+            const result = await requireHostApi('llmConnections').list();
+            if (!Array.isArray(result.connections)) throw new Error('LLM connection list is invalid');
+            return result.connections;
+        },
         saveModelTargetConnection: saveModelTargetAsLlmConnection,
         subscribeProfilesChanged: subscribeAgentProfilesChanged,
         subscribeModelTargetsChanged: subscribeModelTargetChanges,

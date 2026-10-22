@@ -66,7 +66,7 @@ export function applyPresetName(draft: AgentProfileDraft, name: string): void {
     };
 }
 
-export function applyModelMode(draft: AgentProfileDraft, mode: string, modelTargets: readonly AgentModelTarget[]): void {
+export function applyModelMode(draft: AgentProfileDraft, mode: string, modelTargets: readonly AgentModelTarget[], connections: readonly TauriTavernLlmConnectionSummary[] = []): void {
     if (mode === 'currentPromptSnapshot') {
         draft.model = {
             mode: 'currentPromptSnapshot',
@@ -86,10 +86,9 @@ export function applyModelMode(draft: AgentProfileDraft, mode: string, modelTarg
         return;
     }
     const [target] = modelTargets;
-    if (!target) {
-        throw new Error(tr('noSavedModelTargets'));
-    }
-    draft.model = modelBindingFromTarget(target);
+    draft.model = target ? modelBindingFromTarget(target) : {
+        mode: 'connectionRef', connectionRef: connections[0]?.id ?? '', modelId: '',
+    };
 }
 
 export function applyModelTarget(
