@@ -45,13 +45,34 @@
 }
 
 .ttas-state-section {
-    margin: 10px 0;
-    padding: 8px;
+    min-width: 0;
+    margin: 6px 0;
     border: 1px solid var(--ttas-border-soft);
     border-radius: var(--ttas-radius-sm);
 }
 
-.ttas-state-section > summary { cursor: pointer; font-weight: 600; }
+.ttas-state-branch-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 38px;
+    padding: 8px;
+    border: 0;
+    border-radius: inherit;
+    background: var(--ttas-surface-soft);
+    color: inherit;
+    text-align: start;
+    cursor: pointer;
+}
+
+.ttas-state-branch-toggle:hover { background: var(--ttas-surface-strong); }
+.ttas-state-branch-toggle > i { flex: 0 0 12px; font-size: .75em; }
+.ttas-state-node-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.ttas-state-branch-toggle > small { flex-shrink: 0; color: var(--ttas-muted); }
+.ttas-state-modified { flex-shrink: 0; color: var(--ttas-accent); font-size: .75em; }
+.ttas-state-children { min-width: 0; margin: 0 8px 8px; padding-inline-start: 10px; border-inline-start: 1px solid var(--ttas-border-soft); }
+.ttas-state-metadata { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0; color: var(--ttas-muted); font-size: .8em; }
 .ttas-state-field { display: grid; gap: 6px; margin: 12px 0; }
 .ttas-state-field > span, .ttas-state-version { overflow-wrap: anywhere; font-size: .85em; }
 .ttas-state-field textarea { width: 100%; resize: vertical; }
