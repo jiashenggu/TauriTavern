@@ -225,7 +225,8 @@ async function resolveMobileDownloadTarget(pathApi, fileName, fallbackName) {
 }
 
 function isTauriRuntime() {
-    return typeof getTauriObject()?.core?.invoke === 'function';
+    return !globalThis.window?.__TAURITAVERN_BROWSER__
+        && typeof getTauriObject()?.core?.invoke === 'function';
 }
 
 function isMobileRuntime() {

@@ -1,5 +1,10 @@
 # TauriTavern 后端结构
 
+可选浏览器传输的边界见 [BrowserAccess](BrowserAccess.md)：
+`tt-adapter-browser` 只拥有 HTTP/auth/session IO，通过有界通道连接 host；
+`tauritavern/app/host/browser_access` 拥有 Tauri relay/resource glue。
+业务调用仍经正常本地 Tauri IPC 到现有 commands/AppState，不建立第二个数据 owner。
+
 本文档说明 TauriTavern Rust 后端的 **Clean Architecture 原则、workspace crate 边界、依赖方向和代码落点**。
 
 它不是 API 命令清单，也不是专题实现百科。具体 API 参考 `docs/API/`，当前实现快照参考 `docs/CurrentState/`，前端宿主契约参考 `docs/FrontendHostContract.md`。
@@ -54,6 +59,7 @@ src-tauri/
     ├── tt-ports
     ├── tt-application
     ├── tt-adapter-http
+    ├── tt-adapter-browser
     ├── tt-adapter-mcp
     ├── tt-adapter-provider-http
     ├── tt-adapter-vector
@@ -78,6 +84,7 @@ src-tauri/
 | `tt-ports` | repository / gateway / runtime trait、Host Resource opened-source port |
 | `tt-application` | 用例服务、业务编排、任务协调、policy 执行 |
 | `tt-adapter-http` | 共享 HTTP client pool/profile/helper |
+| `tt-adapter-browser` | 可选私有浏览器 HTTP/auth/session transport；有界通道接入现有 native host，不拥有业务数据或第二套后端 |
 | `tt-adapter-mcp` | RMCP client、Streamable HTTP lifecycle、bounded response、tools/list pagination 与 tool validation |
 | `tt-adapter-provider-http` | LLM、SearXNG、SD、Translate、TTS、embedding、provider metadata 的 HTTP repository |
 | `tt-adapter-triviumdb` | 按命名空间管理 TriviumDB、阻塞执行、原生查询与持久化 |

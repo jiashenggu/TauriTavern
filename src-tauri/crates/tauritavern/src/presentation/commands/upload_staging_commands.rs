@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
@@ -87,10 +87,7 @@ fn chunk_size_for_kind(kind: &str) -> u64 {
 }
 
 fn staging_root(app: &AppHandle, kind: &str) -> Result<PathBuf, CommandError> {
-    let path_resolver = app.path();
-    let base = path_resolver
-        .app_cache_dir()
-        .or_else(|_| path_resolver.temp_dir())
+    let base = crate::infrastructure::paths::app_cache_dir(app)
         .map_err(|error| {
             CommandError::InternalServerError(format!(
                 "Failed to resolve upload staging directory: {}",

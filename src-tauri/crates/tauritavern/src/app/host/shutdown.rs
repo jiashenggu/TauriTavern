@@ -32,6 +32,20 @@ pub(super) fn install_window_close_handler(window: &tauri::webview::WebviewWindo
 }
 
 pub(super) fn handle_run_event(app_handle: &tauri::AppHandle, event: tauri::RunEvent) {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if matches!(
+        &event,
+        tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. }
+            if label == MAIN_WINDOW_LABEL
+    ) && let Some(relay) = app_handle.get_webview_window(super::browser_access::RELAY_LABEL)
+    {
+        // The frontend has completed graceful shutdown and destroyed main.
+        // A hidden transport window must not keep the desktop process alive.
+        if let Err(error) = relay.destroy() {
+            tracing::error!("Failed to close the browser relay during shutdown: {error}");
+        }
+    }
+
     if let tauri::RunEvent::ExitRequested {
         code: None, api, ..
     } = &event

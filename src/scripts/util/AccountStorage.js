@@ -1,4 +1,5 @@
 import { saveSettingsDebounced } from '../../script.js';
+import { installSharedLocalStorage } from '../../tauri/main/adapters/storage/shared-local-storage.js';
 
 const MIGRATED_MARKER = '__migrated';
 const MIGRATABLE_KEYS = [
@@ -78,6 +79,7 @@ class AccountStorage {
         }
 
         this.#ready = true;
+        installSharedLocalStorage(this);
     }
 
     /**

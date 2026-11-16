@@ -84,6 +84,9 @@ fn resolve_runtime_paths_inner(app_handle: &AppHandle) -> Result<RuntimePaths, B
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn resolve_runtime_paths_inner(app_handle: &AppHandle) -> Result<RuntimePaths, Box<dyn Error>> {
+    if let Some(root) = isolated_preview_root(app_handle)? {
+        return Ok(RuntimePaths::new(RuntimeMode::Standard, root));
+    }
     let mode = detect_desktop_runtime_mode();
     let paths = match mode {
         RuntimeMode::Portable => resolve_portable_runtime_paths(),
@@ -91,6 +94,31 @@ fn resolve_runtime_paths_inner(app_handle: &AppHandle) -> Result<RuntimePaths, B
     }?;
 
     apply_runtime_config(paths)
+}
+
+/// A preview must opt into a different compiled app identity before it can
+/// override paths. Never load a persisted migration/config from the real app.
+pub(crate) fn isolated_preview_root(app: &AppHandle) -> Result<Option<PathBuf>, Box<dyn Error>> {
+    let Some(value) = std::env::var_os("TAURITAVERN_ISOLATED_ROOT") else {
+        return Ok(None);
+    };
+    if !cfg!(debug_assertions) || app.config().identifier != "com.tauritavern.browser-preview" {
+        return Err("Isolated root requires the debug browser-preview app identifier".into());
+    }
+    let root = PathBuf::from(value);
+    if !root.is_absolute() {
+        return Err("Isolated root must be absolute".into());
+    }
+    Ok(Some(root))
+}
+
+pub(crate) fn app_cache_dir(app: &AppHandle) -> Result<PathBuf, Box<dyn Error>> {
+    if let Some(root) = isolated_preview_root(app)? {
+        let cache = root.join("cache");
+        std::fs::create_dir_all(&cache)?;
+        return Ok(cache);
+    }
+    Ok(app.path().app_cache_dir().or_else(|_| app.path().temp_dir())?)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]

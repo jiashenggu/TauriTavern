@@ -1,3 +1,6 @@
+# Isolated browser-access development outputs; never commit tokens or test data.
+.browser-preview/
+.remote-target/
 /data/
 /tmp/
 /.claude/

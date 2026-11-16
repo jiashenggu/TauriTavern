@@ -1,5 +1,12 @@
 // Application bootstrap.
 
+// Only the authenticated HTTP host adds this marker. Do not infer a browser
+// from missing native globals: mobile Tauri can inject them a little later.
+if (document.querySelector('meta[name="tauritavern-browser-host"]')?.content === '1') {
+    const { installBrowserTransport } = await import('./browser-transport.js');
+    await installBrowserTransport();
+}
+
 window.__TAURI_RUNNING__ = true;
 
 // In some WebKit builds, `location.href` may omit the trailing slash for origin-only
@@ -93,6 +100,9 @@ function normalizeInvokeBytes(value) {
 async function setupDevThirdPartyExtensionServiceWorker() {
     if (typeof window === 'undefined') {
         return;
+    }
+    if (window.__TAURITAVERN_BROWSER__) {
+        return; // The HTTP host serves resources directly, including on private HTTP origins.
     }
 
     const announceDevSwProxyBridge = () => {
@@ -215,16 +225,20 @@ async function setupDevThirdPartyExtensionServiceWorker() {
     try {
         installClientProxyBridge(ttExtBaseUrl);
         await navigator.serviceWorker.register(swUrl, { scope: '/' });
-        await navigator.serviceWorker.ready;
+        const registration = await navigator.serviceWorker.ready;
 
         if (!navigator.serviceWorker.controller) {
-            await new Promise((resolve) => {
+            const controlled = new Promise((resolve) => {
                 const timeoutId = setTimeout(resolve, 1000);
                 navigator.serviceWorker.addEventListener('controllerchange', () => {
                     clearTimeout(timeoutId);
                     resolve();
                 }, { once: true });
             });
+            // Another same-origin webview can keep an unregistered worker alive;
+            // registering again then reuses it without a new `activate` claim.
+            registration.active?.postMessage({ type: 'tt-ext-claim' });
+            await controlled;
         }
 
         announceDevSwProxyBridge();

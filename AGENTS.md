@@ -31,6 +31,8 @@
 
 ## 本地验证记录
 
+- 浏览器会话由 `tt-adapter-browser` 管理：保留八小时有效期和八个会话的容量边界；满额时回收至少一分钟无活动且没有在途 HTTP 请求或 SSE 连接的最久未使用会话。不要用删除 Cookie、关闭标签页或未保存 Cookie 的探测次数推断在线设备数量；真实入口验收创建的会话结束后应调用原退出接口释放。
+
 - 2026-10-23 斗罗章号卡5／重启空白：实际请求15012将旧章号硬设为权威，手动发送虽补全推进包仍返回5；选项直接`context.generate()`还绕过发送登记。用户退出后已安装`tmp/douluo-progress-repair-20261022/`：本轮章节分类可纠正旧路线，只有手动指定/开局档案硬锁；最终路线贯穿补全、校验与缓存，完整已选章节资料送入推进提示；Reborn2.3行动选项改走原生发送按钮，六处副本同步。00:53启动`official_agent_api_missing`导致年代/章节空白，00:56接口后来可用；现启动显式等待最多30秒，超时可见失败。132条JSONL保留至魔蛛下腹被矿石击伤、尚待绝杀；从记录109入林起章号校正6，推进包、ACU导出及当前聊天localStorage同步，全部助手正文与其他玩家字段不变，354个浏览器无关键保持。10项实际函数/DOM验证、12帧SQL回放、PNG/安装SHA通过；完整check前端/契约/UI通过，Rust停在aws-lc-sys/vswhom-sys本机构建，不能记全套通过。隔离Rstest并发正确配置为`pool.maxWorkers=2`，顶层maxWorkers无效。模型请求0，未做安装后WebView生成验证。收据`installed.json`/`storage-installed.json`；后续仅`python -X utf8 tmp/douluo-progress-repair-20261022/manage.py verify`核对安装快照，新游玩后不重放prepare/apply或为旧SHA回滚。
 
 - 2026-10-22 “吾乃小猫之神”展开空白显示兼容：用户将异常面板留在可见位置后，只读截图证实网格背景正常但正文、脚印及收起文字未绘出；UI Automation 确认两个正文节点共178字符仍在可见区域、IsHidden=false、颜色#a07383，原回复181字符未丢。同步/异步显示正则、真实messageFormatting及JSR iframe包装回放保留正文；同版Edge155、598CSSpx、DPR3截图可见，未在隔离环境复现实际会话绘制异常，因此不能声称已证明某个CSS属性为唯一根因。用户退出后，已将Reborn2.3启用的2.5折叠模板改为直接display开合，去掉背景模糊和max-height裁剪动画，保留配色、正文、图标与键盘/底部收起；保存/活动预设的原生正则、SPreset绑定和序列化配置六处同步，其他配置语义不变，8个保护文件SHA一致，旧SPreset本地加载verify仍通过。源码、截图、备份及收据在`tmp/cat-panel-diagnosis-20261022/`，后续仅`python -X utf8 tmp/cat-panel-diagnosis-20261022/manage.py verify`，不重放prepare/apply覆盖新配置。真实显示链路的展开/收起/键盘重开、高度与无异常检查及隔离完整pnpm check通过（UI2 worker、Rust单测试线程/2构建任务）；模型请求0，安装后的桌面显示恢复尚待确认。未切窗、点击、滚动或聚焦用户窗口；原始现场通过用户停留后后台只读截图取得。

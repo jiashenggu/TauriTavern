@@ -121,12 +121,16 @@ function installTauriMobileCompat() {
     for (const install of [
         installMobileRuntimeCompat,
         installMobileGeometryFirewall,
-        installAndroidImeLayoutHost,
-        installMobileImeSurfaceController,
-        installMobileOverlayCompatController,
     ]) {
         install();
     }
+    // Browser keyboards belong to the browser viewport, not Android's native
+    // insets bridge. Keep that bridge mandatory for actual Android WebViews.
+    if (!window.__TAURITAVERN_BROWSER__) {
+        installAndroidImeLayoutHost();
+        installMobileImeSurfaceController();
+    }
+    installMobileOverlayCompatController();
 }
 
 function getWindowOrigin(targetWindow) {
@@ -276,7 +280,7 @@ export function bootstrapTauriMain() {
 
     installFrontendLogCapture();
     installDialogPolyfillCoverage();
-    if (!isMobile) {
+    if (!isMobile && !window.__TAURITAVERN_BROWSER__) {
         installDesktopFullscreenShortcut();
         registerLifecycleFlushHandler('desktop-fullscreen', leaveDesktopFullscreenForShutdown);
     }
@@ -377,7 +381,7 @@ export function bootstrapTauriMain() {
         installDialogPolyfillCoverage(targetWindow);
         if (isMobile) {
             installMobileRuntimeCompat(targetWindow);
-        } else {
+        } else if (!window.__TAURITAVERN_BROWSER__) {
             installDesktopFullscreenShortcut(targetWindow);
         }
     };
@@ -405,7 +409,9 @@ export function bootstrapTauriMain() {
         window.__TAURITAVERN__.ready = readyPromise;
     }
 
-    runAfterTauriReady(() => setFrontendLogBackendForwardingEnabled(true));
+    if (!window.__TAURITAVERN_BROWSER__) {
+        runAfterTauriReady(() => setFrontendLogBackendForwardingEnabled(true));
+    }
 
     runAfterTauriReady(() => import('../../scripts/tauri/setting/setting-panel.js')
         .then(({ installTauriTavernSettingsPanel }) => installTauriTavernSettingsPanel())

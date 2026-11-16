@@ -7815,6 +7815,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "tt-adapter-archive",
+ "tt-adapter-browser",
  "tt-adapter-extension",
  "tt-adapter-http",
  "tt-adapter-mcp",
@@ -8424,6 +8425,21 @@ dependencies = [
  "typed-path",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "tt-adapter-browser"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "headers",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "url",
+ "uuid",
 ]
 
 [[package]]

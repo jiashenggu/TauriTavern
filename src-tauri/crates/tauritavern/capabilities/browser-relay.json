@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "browser-relay",
+  "description": "Local, hidden browser transport relay. No remote URLs or filesystem permissions.",
+  "windows": ["browser-relay"],
+  "platforms": ["windows", "macOS", "linux"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:resources:allow-close"
+  ]
+}

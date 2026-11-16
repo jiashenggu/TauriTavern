@@ -2,15 +2,16 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { subscribe } from '@parcel/watcher';
-import { rspack } from '@rspack/core';
 
 import { createRspackConfigs } from '../rspack.config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const frontendRoot = path.resolve(__dirname, '..', 'src');
-const port = 1430;
+const port = Number(process.env.TAURITAVERN_DEV_PORT || 1430);
+if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    throw new Error('TAURITAVERN_DEV_PORT must be an integer between 1024 and 65535');
+}
 const reloadPath = '/__tauritavern_dev_reload';
 const reloadHost = process.env.TAURI_DEV_HOST || 'localhost';
 const reloadUrl = `http://${formatUrlHost(reloadHost)}:${port}${reloadPath}`;
@@ -217,6 +218,7 @@ function scheduleReload() {
 }
 
 async function watchFrontend() {
+    const { subscribe } = await import('@parcel/watcher');
     // The native Windows backend excludes last-access notifications.
     const watcher = await subscribe(frontendRoot, (error, events) => {
         if (error) {
@@ -248,6 +250,7 @@ function closeRspack(compiler, watcher) {
 }
 
 async function startBundleWatch() {
+    const { rspack } = await import('@rspack/core');
     const compiler = rspack(rspackConfigs);
     let initialBuild = true;
     let watcher;
@@ -343,14 +346,24 @@ process.on('SIGINT', () => void shutdown());
 process.on('SIGTERM', () => void shutdown());
 
 async function main() {
-    closeBundleWatcher = await startBundleWatch();
-    try {
-        closeFrontendWatcher = await watchFrontend();
-    } catch (error) {
-        await closeBundleWatcher();
-        throw error;
+    if (process.env.TAURITAVERN_DEV_STATIC_ONLY === '1') {
+        // Isolated smoke tests may serve already-built assets without retaining
+        // the compiler in memory alongside a large native build/application.
+        if (!fs.existsSync(path.join(frontendRoot, 'dist/lib.core.bundle.js'))) {
+            throw new Error('Build frontend bundles before using static-only mode');
+        }
+        closeBundleWatcher = async () => {};
+        closeFrontendWatcher = async () => {};
+    } else {
+        closeBundleWatcher = await startBundleWatch();
+        try {
+            closeFrontendWatcher = await watchFrontend();
+        } catch (error) {
+            await closeBundleWatcher();
+            throw error;
+        }
     }
-    server.listen(port, () => {
+    server.listen({ port, host: process.env.TAURITAVERN_DEV_BIND }, () => {
         console.log(`TauriTavern frontend dev server listening on http://localhost:${port}`);
         console.log(`TauriTavern reload endpoint advertised as ${reloadUrl}`);
     });

@@ -165,7 +165,7 @@ function hasOwnPolyfill(target, property) {
 }
 
 function installAndroidClipboardWriteCompat(targetWindow) {
-    if (!isAndroidRuntime()) {
+    if (!isAndroidRuntime() || globalThis.window?.__TAURITAVERN_BROWSER__) {
         return;
     }
 

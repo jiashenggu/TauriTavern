@@ -1,5 +1,11 @@
 pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        super::browser_access_commands::browser_access_ready,
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        super::browser_access_commands::browser_access_reply,
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        super::browser_access_commands::browser_access_channel,
         // TriviumDB commands
         super::database_commands::database_handle,
         // Character commands

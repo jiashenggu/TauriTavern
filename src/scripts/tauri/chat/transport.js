@@ -7,7 +7,7 @@ import {
 import { createReadableFileStreamService } from '../../../tauri/main/services/files/readable-file-stream-service.js';
 import { commitChatMetadata, commitChatPayload } from './commit.js';
 import { jsonlStreamToPayload, jsonlToPayload } from './jsonl.js';
-import { loadColdChatPayload } from './cold-swipes.js';
+import { discardColdChatPayload, hydrateMessageSwipes, loadColdChatPayload } from './cold-swipes.js';
 
 const { createReadableFileStream } = createReadableFileStreamService({ invoke });
 
@@ -51,9 +51,26 @@ function groupTarget(id) {
     return { kind: 'group', chatId };
 }
 
+async function loadBrowserChatPayload(target, allowNotFound) {
+    // Browsers have typed chat resources, not the computer's filesystem plugin.
+    // Full mode must hydrate every historical swipe before exposing the payload.
+    const payload = await loadColdChatPayload(target, allowNotFound);
+    try {
+        for (const message of payload) {
+            await hydrateMessageSwipes(message);
+        }
+        return payload;
+    } finally {
+        discardColdChatPayload(payload);
+    }
+}
+
 export async function loadCharacterChatPayload({ characterName, avatarUrl, fileName, allowNotFound = false, coldSwipes = false }) {
     const target = characterTarget({ characterName, avatarUrl, fileName });
     if (coldSwipes) return loadColdChatPayload(target, allowNotFound);
+    if (globalThis.window?.__TAURITAVERN_BROWSER__ === true) {
+        return loadBrowserChatPayload(target, allowNotFound);
+    }
     const path = await invoke('get_chat_payload_path', {
         characterName: target.characterId,
         fileName: target.fileName,
@@ -144,6 +161,9 @@ export async function readCharacterChatMessageRange({ characterName, avatarUrl, 
 export async function loadGroupChatPayload({ id, allowNotFound = false, coldSwipes = false }) {
     const target = groupTarget(id);
     if (coldSwipes) return loadColdChatPayload(target, allowNotFound);
+    if (globalThis.window?.__TAURITAVERN_BROWSER__ === true) {
+        return loadBrowserChatPayload(target, allowNotFound);
+    }
     const path = await invoke('get_group_chat_path', { id: target.chatId, allowNotFound });
 
     if (!path) {

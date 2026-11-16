@@ -98,6 +98,7 @@ const PORTS_FORBIDDEN_SOURCE_PATTERNS = [
 ];
 
 const APPLICATION_FORBIDDEN_PACKAGES = new Set([
+    'tt-adapter-browser',
     'async-compression',
     'axum',
     'image',
@@ -127,6 +128,7 @@ const APPLICATION_FORBIDDEN_PACKAGES = new Set([
 ]);
 
 const APPLICATION_FORBIDDEN_SOURCE_PATTERNS = [
+    ['tt-adapter-browser', /\btt_adapter_browser::/],
     ['domain facade path', /\bcrate::domain::/],
     ['app host path', /\bcrate::app::/],
     ['infrastructure path', /\bcrate::infrastructure::/],
@@ -587,6 +589,7 @@ const CRATES = [
     crateConfig('tt-ports', PORTS_FORBIDDEN_PACKAGES, PORTS_FORBIDDEN_SOURCE_PATTERNS),
     crateConfig('tt-application', APPLICATION_FORBIDDEN_PACKAGES, APPLICATION_FORBIDDEN_SOURCE_PATTERNS),
     crateConfig('tt-adapter-http', ADAPTER_HTTP_FORBIDDEN_PACKAGES, ADAPTER_FORBIDDEN_SOURCE_PATTERNS),
+    crateConfig('tt-adapter-browser', new Set(['tauri', 'tauritavern', 'tt-application']), ADAPTER_FORBIDDEN_SOURCE_PATTERNS),
     crateConfig('tt-adapter-mcp', ADAPTER_MCP_FORBIDDEN_PACKAGES, ADAPTER_MCP_FORBIDDEN_SOURCE_PATTERNS),
     crateConfig('tt-adapter-tokenization', ADAPTER_TOKENIZATION_FORBIDDEN_PACKAGES, ADAPTER_TOKENIZATION_FORBIDDEN_SOURCE_PATTERNS),
     crateConfig('tt-adapter-sync', ADAPTER_SYNC_FORBIDDEN_PACKAGES, ADAPTER_SYNC_FORBIDDEN_SOURCE_PATTERNS),

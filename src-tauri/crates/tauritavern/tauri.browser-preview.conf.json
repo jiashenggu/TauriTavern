@@ -1,0 +1,12 @@
+{
+  "identifier": "com.tauritavern.browser-preview",
+  "productName": "TauriTavern Browser Preview",
+  "build": {
+    "devUrl": "http://localhost:1431",
+    "beforeDevCommand": {
+      "script": "node scripts/tauri-dev-server.mjs",
+      "cwd": "../../.."
+    }
+  },
+  "bundle": { "active": false }
+}

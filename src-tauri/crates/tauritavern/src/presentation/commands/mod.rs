@@ -5,6 +5,8 @@ pub mod asset_commands;
 pub mod avatar_commands;
 pub mod background_commands;
 pub mod bootstrap_commands;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod browser_access_commands;
 pub mod bridge;
 pub mod character_commands;
 pub mod chat_api_commands;

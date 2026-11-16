@@ -69,6 +69,13 @@ pub(super) fn create_main_window(
             handle_tauri_web_resource_request(host_resource_service.as_ref(), &request, response);
         });
 
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let builder = if let Some(root) = crate::infrastructure::paths::isolated_preview_root(app.handle())? {
+        builder.data_directory(root.join("cache").join("main-webview"))
+    } else {
+        builder
+    };
+
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     let builder = {
         // Use the frontend's HTML5 drop handlers instead of Tauri's native

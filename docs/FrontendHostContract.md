@@ -1,5 +1,13 @@
 # Frontend Host Contract（TauriTavern）
 
+浏览器访问契约：已认证的私有 HTTP 宿主为入口 HTML 添加专用 meta 标记时，
+`init.js` 先安装 `browser-transport.js`，再执行原有启动链路。
+`window.__TAURITAVERN_BROWSER__` 区分浏览器宿主；原生环境不替换 bridge。
+手机浏览器不安装 Android 原生 IME/insets 路由，也不把浏览器 Clipboard API 替换成电脑剪贴板；原生 Android 的强制 bridge 契约保持不变。
+浏览器资源由 HTTP 宿主直接提供，不注册 Tauri 开发 Service Worker；
+二进制 invoke 结果与 Channel 保持桥接语义。权限范围、断线失败语义和部署前提见
+[BrowserAccess](BrowserAccess.md)。Rust 命令名不是新增的第三方公共 API。
+
 > 目的：把“宿主平台层（Host Kernel）对外承诺的行为”显式化，避免重构 `src/tauri/main/*` 时误伤上游 SillyTavern / 第三方扩展 / 重脚本 / 角色卡。  
 > 范围：仅覆盖前端宿主层（WebView 内运行的 Host Kernel）对外可观察的契约；不描述 Rust 后端内部实现。  
 > 参考：`docs/FrontendGuide.md`（集成架构与开发方式）
@@ -331,6 +339,16 @@ TauriTavern 第一方功能在所有平台直接使用同一个原生剪贴板�
 
 ---
 
+### 脚本本地设置（Project）
+
+角色脚本与扩展的持久业务偏好统一保存于
+`accountStorage.__ttSharedLocalStorageV1`，复用现有设置保存与退出刷新队列。
+原生窗口负责首次迁移；浏览器不能以本地默认值初始化共享记录。
+加载 account settings 后、加载扩展前，把共享值恢复到当前 origin 的真实
+`localStorage`，保留同步 Storage API 与同源 iframe 的访问方式。
+设备布局、运行锁、聊天草稿、缓存、回退日志及会话快照保持本地作用域；
+不复制 `sessionStorage`。另一页面读取已保存的新值需刷新；不提供并发编辑合并。
+
 ### 5.3 Dialog 兼容（Public in practice）
 
 > 目的：补齐 iOS/macOS（WKWebView）下脚本生态高频依赖的“浏览器内置弹窗语义”，避免出现“点击后完全无反应”。
@@ -360,6 +378,7 @@ TauriTavern 第一方功能在所有平台直接使用同一个原生剪贴板�
 - Windows/macOS/Linux 主窗口使用无修饰键 `F11` 切换原生窗口全屏；按键长按只响应首次 `keydown`。
 - 宿主在主文档及其同源 iframe 中捕获该快捷键；独立 popup、移动端和带修饰键的 `F11` 不属于此契约。
 - 原生窗口状态是唯一真值；全屏不写入 SillyTavern 设置，也不纳入窗口几何持久化。切换失败会记录错误，后续按键仍可重试。
+- 浏览器访问不安装原生全屏快捷键或退出时的原生窗口恢复；`F11` 由浏览器自己处理，不要求浏览器传输提供 Tauri window API。
 
 ### 5.6 桌面文件拖放（Public in practice）
 

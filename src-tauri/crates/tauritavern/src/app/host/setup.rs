@@ -65,6 +65,8 @@ pub(super) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
         &startup_profile,
     )?;
     let _main_window = super::window::create_main_window(app, host_resource_service)?;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    super::browser_access::install(app)?;
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     super::shutdown::install_window_close_handler(&_main_window);

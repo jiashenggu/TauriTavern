@@ -6,6 +6,8 @@
 //! commands and web resource adapters.
 
 mod observability;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) mod browser_access;
 mod plugins;
 mod resources;
 mod runtime_paths;

@@ -7,6 +7,7 @@ interface Window {
     __TAURI__?: any;
     __TAURI_INTERNALS__?: any;
     __TAURI_RUNNING__?: boolean;
+    __TAURITAVERN_BROWSER__?: boolean;
 
     __TAURITAVERN_MAIN_READY__?: Promise<void>;
 

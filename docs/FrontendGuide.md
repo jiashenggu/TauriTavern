@@ -1,5 +1,8 @@
 # TauriTavern 前端指南
 
+可选的私有浏览器传输见 [BrowserAccess](BrowserAccess.md)。它仍复用本指南的
+`init -> tauri-main -> routes -> invoke` 链路，不引入第二套 `/api` 业务实现。
+
 本文档描述 TauriTavern 当前前端（基于 SillyTavern 1.18.0）在 Tauri 环境下的集成架构与开发方式。
 
 宿主层对外契约清单见：`docs/FrontendHostContract.md`（重构时优先保障其不回归）。

@@ -66,3 +66,16 @@ test('non-Android Web Clipboard is left unchanged', () => {
 
     assert.equal(targetWindow.navigator.clipboard.writeText, writeText);
 });
+
+test('Android browser access preserves the browser clipboard instead of invoking the computer', () => {
+    setRuntimeUserAgent('Mozilla/5.0 (Linux; Android 15)');
+    global.window.__TAURITAVERN_BROWSER__ = true;
+    try {
+        const writeText = async () => {};
+        const targetWindow = createTargetWindow('Mozilla/5.0 (Linux; Android 15)', { writeText });
+        installMobileRuntimeCompat(targetWindow);
+        assert.equal(targetWindow.navigator.clipboard.writeText, writeText);
+    } finally {
+        delete global.window.__TAURITAVERN_BROWSER__;
+    }
+});

@@ -4,6 +4,7 @@ import {
     acceptColdChatPayload, discardColdChatPayload, hydrateMessageSwipes, loadColdChatPayload,
     releaseCurrentSwipeSource,
 } from '../src/scripts/tauri/chat/cold-swipes.js';
+import { loadCharacterChatPayload, loadGroupChatPayload } from '../src/scripts/tauri/chat/transport.js';
 
 const original = {
     mes: 'current body', swipe_id: 1, swipes: ['older', 'active'],
@@ -121,5 +122,63 @@ test('hydration rejects shortened arrays without partially filling either array'
         const before = structuredClone(message);
         await assert.rejects(hydrateMessageSwipes(message), /shortened/);
         assert.deepEqual(message, before);
+    } finally { restore(); }
+});
+
+test('browser full-chat loading preserves header, inactive swipes and metadata without filesystem access', async () => {
+    for (const kind of ['character', 'group']) {
+        const header = { user_name: 'Test', chat_metadata: { integrity: 'fixture', custom: ['keep'] } };
+        const streams = new Map();
+        const closed = [];
+        let target;
+        const restore = installHost(async (command, args) => {
+            if (command === 'open_cold_chat') {
+                target = args.target;
+                assert.equal(args.allowNotFound, false);
+                streams.set(100, byteStream(JSON.stringify(header) + '\n' + JSON.stringify(cold())));
+                return { sourceId: 0, readerId: 100 };
+            }
+            if (command === 'open_cold_swipe_record') {
+                streams.set(101, byteStream(JSON.stringify(original)));
+                return 101;
+            }
+            if (command === 'read_chat_bytes') return streams.get(args.rid).shift();
+            if (command === 'plugin:resources|close') { closed.push(args.rid); return; }
+            throw new Error(`Unexpected native or filesystem capability: ${command}`);
+        });
+        globalThis.window.__TAURITAVERN_BROWSER__ = true;
+        try {
+            const payload = kind === 'character'
+                ? await loadCharacterChatPayload({ avatarUrl: 'fixture.png', fileName: 'history.jsonl' })
+                : await loadGroupChatPayload({ id: 'group-history.jsonl' });
+            assert.deepEqual(payload, [header, original]);
+            assert.deepEqual(closed, [100, 101, 0]);
+            assert.deepEqual(target, kind === 'character'
+                ? { kind: 'character', characterId: 'fixture', fileName: 'history' }
+                : { kind: 'group', chatId: 'group-history' });
+        } finally { restore(); }
+    }
+});
+
+test('browser full-chat loading releases its source on hydration failure and allows an absent new chat', async () => {
+    const streams = new Map();
+    const closed = [];
+    const restore = installHost(async (command, args) => {
+        if (command === 'open_cold_chat') {
+            if (args.allowNotFound) return null;
+            streams.set(100, byteStream(JSON.stringify({ chat_metadata: {} }) + '\n' + JSON.stringify(cold())));
+            return { sourceId: 0, readerId: 100 };
+        }
+        if (command === 'open_cold_swipe_record') throw new Error('fixture read failed');
+        if (command === 'read_chat_bytes') return streams.get(args.rid).shift();
+        if (command === 'plugin:resources|close') { closed.push(args.rid); return; }
+        throw new Error(command);
+    });
+    globalThis.window.__TAURITAVERN_BROWSER__ = true;
+    try {
+        await assert.rejects(loadCharacterChatPayload({ avatarUrl: 'fixture.png', fileName: 'history' }),
+            /fixture read failed/);
+        assert.deepEqual(closed, [100, 0]);
+        assert.deepEqual(await loadGroupChatPayload({ id: 'new', allowNotFound: true }), []);
     } finally { restore(); }
 });
