@@ -116,7 +116,8 @@ Host Resource 只校验浏览器 URL 的路径段，不禁止 data root 内部 s
 开发态本地 Web 入口：
 
 - `scripts/tauri-dev-server.mjs` 会在入口文档最前面注入 `src/dev-sw-bootstrap.js`；新 WebView 会话若继承旧 Service Worker controller，会先注销旧注册并重载一次，避免跨宿主进程复用失效的 Wry 协议过滤器
-- `src/init.js` 会注册 `/tt-ext-sw.js`
+- `src/init.js` 会注册 `/tt-ext-sw.js`；同源的其他 webview（如隐藏的 browser-relay）会让被注销的 worker 继续存活，重新注册时复用它且不再触发 `activate`，因此页面未被接管时由 `init.js` 发送 `tt-ext-claim` 让 worker 主动 `clients.claim()`
+- Service Worker 只代理自身 origin 的路径；window-context fallback 对 `tt-ext` 端点的跨源 fetch 不得再次被代理，否则会在 client bridge 上递归超时
 - Service Worker 将 `/css/user.css`、`/scripts/extensions/third-party/*`、`/thumbnail`、`/characters/*`、`/User Avatars/*`、`/backgrounds/*`、`/assets/*`、`/user/images/*`、`/user/files/*` 转发到 `tt-ext` 自定义 scheme
 - Rust 侧 `register_uri_scheme_protocol("tt-ext", ...)` 在 dev 下统一分发上述资源请求
 - `convertFileSrc('', 'tt-ext')` 的结果可能因平台/WebView 不同而表现为 `tt-ext://localhost/` 或 `http(s)://tt-ext.localhost/`

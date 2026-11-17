@@ -1060,7 +1060,7 @@ export function initRossMods() {
                 return;
             }
 
-            if (scrollToLatestAssistantMessage($)) {
+            if (scrollToLatestAssistantMessage($, animateChatScrollTop)) {
                 event.preventDefault();
             }
             return;

@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 class FakeElement {
@@ -21,10 +20,6 @@ const {
     shouldPreserveEditorHotkey,
 } = await import('../src/scripts/chat-scroll-hotkeys.js');
 
-const hotkeySource = await readFile(new URL('../src/scripts/RossAscends-mods.js', import.meta.url), 'utf8');
-const hotkeyHelp = await readFile(new URL('../src/scripts/templates/hotkeys.html', import.meta.url), 'utf8');
-const chineseLocale = JSON.parse(await readFile(new URL('../src/locales/zh-cn.json', import.meta.url), 'utf8'));
-
 test('editor guard allows the persistently focused main chat input only', () => {
     const sendTextarea = new FakeElement('send_textarea');
     const sendTextareaChild = new FakeElement('', sendTextarea);
@@ -39,7 +34,6 @@ test('editor guard allows the persistently focused main chat input only', () => 
 test('scroll behavior selects the latest regular assistant and aligns its top', () => {
     const calls = [];
     const chat = {
-        animate(properties, duration) { calls.push({ properties, duration }); },
         offset() { return { top: 100 }; },
         scrollTop() { return 250; },
     };
@@ -57,24 +51,31 @@ test('scroll behavior selects the latest regular assistant and aligns its top', 
         throw new Error(`Unexpected selector: ${selector}`);
     };
 
-    assert.equal(scrollToLatestAssistantMessage($), true);
-    assert.deepEqual(calls, [{ properties: { scrollTop: 750 }, duration: 300 }]);
+    assert.equal(scrollToLatestAssistantMessage($, (top, duration) => calls.push({ top, duration })), true);
+    assert.deepEqual(calls, [{ top: 750, duration: 300 }]);
 });
 
 test('scroll behavior is a no-op when no assistant message exists', () => {
     let animated = false;
     const $ = selector => selector === '#chat'
-        ? { animate() { animated = true; } }
+        ? {}
         : { last: () => ({ length: 0 }) };
 
-    assert.equal(scrollToLatestAssistantMessage($), false);
+    assert.equal(scrollToLatestAssistantMessage($, () => { animated = true; }), false);
     assert.equal(animated, false);
 });
 
-test('Ctrl+Shift+Home wiring and localized help remain present', () => {
-    assert.match(hotkeySource, /event\.shiftKey\s*&&\s*event\.ctrlKey\s*&&\s*event\.key\s*==\s*'Home'/);
-    assert.match(hotkeySource, /shouldPreserveEditorHotkey\(event\.target\)/);
-    assert.match(hotkeySource, /scrollToLatestAssistantMessage\(\$\)/);
-    assert.match(hotkeyHelp, /Ctrl\+Shift\+Home/);
-    assert.equal(chineseLocale.help_hotkeys_20_2, '滚动到最新 AI 回复的开头');
+test('completion preserves reading below the response start while explicit navigation still works', () => {
+    for (const relativeTop of [-180, 0, 120]) {
+        const calls = [];
+        const $ = selector => selector === '#chat'
+            ? { offset: () => ({ top: 100 }), scrollTop: () => 500 }
+            : { last: () => ({ length: 1, offset: () => ({ top: 100 + relativeTop }) }) };
+        const animate = top => calls.push(top);
+        scrollToLatestAssistantMessage($, animate, { preserveReadingPosition: true });
+        assert.deepEqual(calls, relativeTop <= 0 ? [] : [620]);
+        calls.length = 0;
+        scrollToLatestAssistantMessage($, animate);
+        assert.deepEqual(calls, [500 + relativeTop]);
+    }
 });

@@ -152,6 +152,7 @@ src/
 - 外部 renderer 通过 `window.__TAURITAVERN__.api.chatSurface.registerParticipant()` 接入，不直接控制投影，也不依赖伪造消息事件。
 - 异步模板通过独立的 `registerContentProcessor()` 准备显示 HTML；`content-preparation.js` 保存消息内容结果，滚动重挂载不重复求值。manifest `hooks.chatSurface` 在首次投影前完成注册，内容结果通过既有同步事务交给 participant。
 - 最终内容统一通过 `getMessageTextHTML()` 格式化；核心调用 `finalizeMessageContent(messageId, event?, ...args)` 完成内容提交后再发送相应消息事件。刷新只替换内容，控制器的 `commitContent()` 只提交已准备内容，不回到预处理入口。
+- 前台生成成功更新助手回复后，等待嵌套生成、工具调用和自动续写全部结束，再通过 ChatSurface 自动执行一次与 `Ctrl+Shift+Home` 相同的回复开头定位，并取消尚未执行的跟随底部帧。流式输出期间的滚动保持原行为；quiet、dry run、代写用户消息及没有新回复的操作不触发完成定位。
 - renderer 在入口只调用一次 `isManagedOwnershipRequired()`：`true` 时只启用 participant owner，`false` 时只启用原 static owner；API 是否存在和当前 DOM 形状都不能替代该决策。
 - 结构 reconcile 与纯 range projection 分离：前者只在 canonical `chat[]` 结构改变时 O(N) 执行，后者携带 epoch/revision token 并保持 O(M)。
 - mount lease 与 content lease 分离；streaming 中间帧只提交内容，最终帧才恢复 decorator/runtime。

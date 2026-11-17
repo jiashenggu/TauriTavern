@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, test } from '@rstest/core';
 
@@ -99,6 +99,25 @@ test('objects and arrays expand one level at a time and collapsed edits retain e
         { pointer: '/characters/0/resources/energy', kind: 'number', valueJson: '123456789012345678902' },
         { pointer: '/characters/a~1b~0c/state', kind: 'string', valueJson: '"已休整"' },
     ]);
+});
+
+test('the state toggle stays where it was dragged across remounts and a drag does not open the panel', () => {
+    localStorage.clear();
+    const api: TauriTavernAgentStateApi = { ...idle, readCurrent: () => Promise.resolve(document()), save: () => Promise.reject(new Error('must not save')) };
+    const first = render(<AgentStatePanel api={api} tr={tr} subscribeContext={subscribeContext} />);
+    const toggle = screen.getByRole('button', { name: 'stateTitle' });
+    fireEvent.pointerDown(toggle, { pointerId: 1, isPrimary: true, button: 0, clientX: 500, clientY: 400 });
+    fireEvent.pointerMove(toggle, { pointerId: 1, isPrimary: true, clientX: 300, clientY: 250 });
+    fireEvent.pointerUp(toggle, { pointerId: 1, isPrimary: true, clientX: 300, clientY: 250 });
+    fireEvent.click(toggle, { detail: 1 });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    const { left, top } = toggle.style;
+    expect(left).not.toBe('');
+    first.unmount();
+    render(<AgentStatePanel api={api} tr={tr} subscribeContext={subscribeContext} />);
+    const restored = screen.getByRole('button', { name: 'stateTitle' });
+    expect([restored.style.left, restored.style.top]).toEqual([left, top]);
+    localStorage.clear();
 });
 
 test('a late state read cannot populate a different chat and running states are read-only', async () => {

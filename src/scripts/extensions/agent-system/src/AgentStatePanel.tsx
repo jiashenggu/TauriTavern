@@ -1,6 +1,7 @@
 import { useEffect, useEffectEvent, useId, useRef, useState } from 'react';
 
 import { CodeMirrorTextarea } from './CodeMirrorTextarea';
+import { installDraggablePosition } from './draggable-position';
 import { errorText } from './host-api';
 import type { AgentSystemMessageKey, AgentSystemTr } from './i18n';
 
@@ -129,6 +130,8 @@ export function AgentStatePanel({ api, tr, subscribeContext }: Props) {
     const [notice, setNotice] = useState('');
     const [confirming, setConfirming] = useState(false);
     const request = useRef(0);
+    const toggleButton = useRef<HTMLButtonElement>(null);
+    useEffect(() => toggleButton.current ? installDraggablePosition(toggleButton.current, 'tt:agentStateToggle:position') : undefined, []);
     const dirty = Boolean(selection && (mode === 'json' ? text !== selection.document.text : Object.keys(drafts).length));
     const disabled = loading || saving || Boolean(selection?.document.readOnly);
     const fields = selection?.document.fields ?? [];
@@ -230,7 +233,7 @@ export function AgentStatePanel({ api, tr, subscribeContext }: Props) {
     }
 
     return <div className="ttas-root ttas-state-root">
-        <button type="button" className="menu_button ttas-state-toggle" aria-expanded={open}
+        <button type="button" ref={toggleButton} className="menu_button ttas-state-toggle" aria-expanded={open}
             onClick={() => { setOpen(!open); if (!open && !selection) void load(); }}>
             <i className="fa-solid fa-database" aria-hidden="true" /> {tr('stateTitle')}
         </button>

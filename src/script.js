@@ -13,6 +13,7 @@ import { getClientVersion as getBridgeClientVersion, getTauriTavernSettings, inv
 import { SILLYTAVERN_COMPAT_VERSION } from './compat-version.js';
 import { getPromptCacheUsage } from './scripts/util/prompt-cache-usage.js';
 import { formatGenerationTimer, updateMessageGenerationInfo } from './scripts/message-generation-info.js';
+import { scrollToLatestAssistantMessage } from './scripts/chat-scroll-hotkeys.js';
 import { registerLifecycleFlushHandler } from './tauri/main/services/lifecycle/lifecycle-flush-service.js';
 import {
     prepareMesTextHtmlWithRuntimePolicy,
@@ -5283,6 +5284,7 @@ const generationIdleGate = createGenerationIdleGate();
 const LEGACY_MCP_GENERATION_CONTEXT = Symbol('legacyMcpGenerationContext');
 let generationInFlightCount = 0;
 let generationHistoryLocator = null;
+let generationCompletedMessage = null;
 
 export function waitForGenerationIdle() {
     return generationIdleGate.wait();
@@ -5323,6 +5325,8 @@ async function exitGeneration() {
 
     generationInFlightCount -= 1;
     if (generationInFlightCount === 0) {
+        const completedMessage = generationCompletedMessage;
+        generationCompletedMessage = null;
         const locator = generationHistoryLocator;
         generationHistoryLocator = null;
         try {
@@ -5332,7 +5336,21 @@ async function exitGeneration() {
         } catch (error) {
             console.error('Failed to report chat-history generation finish', error);
         } finally {
-            generationIdleGate.markIdle();
+            try {
+                if (generationInFlightCount === 0 && completedMessage && chat.at(-1) === completedMessage) {
+                    // Final rendering may still have a follow-bottom frame queued.
+                    // Preserve readers already past the response start; explicit hotkeys still jump.
+                    if (requestId !== null) {
+                        cancelAnimationFrame(requestId);
+                        requestId = null;
+                    }
+                    // A completion jump must not keep animating against wheel input,
+                    // including scroll chained from an embedded UI iframe.
+                    scrollToLatestAssistantMessage($, setChatScrollTop, { preserveReadingPosition: true });
+                }
+            } finally {
+                generationIdleGate.markIdle();
+            }
         }
     }
 }
@@ -5351,9 +5369,25 @@ export async function Generate(type, options = {}, dryRun = false) {
         throw new Error('agent.state_saving: wait for the state save to finish');
     }
     await enterGeneration(dryRun);
+    const previousChatId = getCurrentChatId();
+    const previousMessage = chat.at(-1);
+    const previousText = previousMessage?.mes;
+    const previousSwipeId = previousMessage?.swipe_id;
     try {
-        return await GenerateInternal(type, options, dryRun);
+        const result = await GenerateInternal(type, options, dryRun);
+        const message = chat.at(-1);
+        if (!dryRun && type !== 'quiet' && type !== 'impersonate'
+            && !abortController?.signal.aborted
+            && getCurrentChatId() === previousChatId
+            && message && !message.is_user && !message.is_system
+            && (message !== previousMessage || message.mes !== previousText || message.swipe_id !== previousSwipeId)) {
+            generationCompletedMessage = message;
+        }
+        return result;
     } catch (error) {
+        if (!dryRun && type !== 'quiet' && type !== 'impersonate') {
+            generationCompletedMessage = null;
+        }
         cleanupGenerationAfterUnhandledError(type, dryRun);
         throw error;
     } finally {
